@@ -1,0 +1,40 @@
+services:
+  kaizoku:
+    build: .
+    container_name: kaizoku-go
+    ports:
+      - "9833:9833"
+    environment:
+      KAIZOKU_DOCKER: "true"
+      KAIZOKU_DATABASE_HOST: postgres
+      KAIZOKU_DATABASE_PORT: "5432"
+      KAIZOKU_DATABASE_USER: kaizoku
+      KAIZOKU_DATABASE_PASSWORD: kaizoku
+      KAIZOKU_DATABASE_DBNAME: kaizoku
+      KAIZOKU_DATABASE_SSLMODE: disable
+    volumes:
+      - ./config:/config
+      - ./series:/series
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: kaizoku-postgres
+    environment:
+      POSTGRES_DB: kaizoku
+      POSTGRES_USER: kaizoku
+      POSTGRES_PASSWORD: kaizoku
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kaizoku"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  pgdata:
