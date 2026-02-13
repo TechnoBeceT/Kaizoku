@@ -20,6 +20,7 @@ const cleanupMutation = useCleanupSeries()
 
 const showDeleteDialog = ref(false)
 const deletePhysical = ref(false)
+const matchingProviderId = ref<string | null>(null)
 const toast = useToast()
 
 // Local copy of providers for drag-and-drop reordering
@@ -66,6 +67,9 @@ const displayThumbnail = computed(() =>
 // Effective status
 const knownProviders = computed(() =>
   localProviders.value.filter(p => !p.isUnknown && !p.isUninstalled && !p.isDeleted)
+)
+const hasNonUnknownProviders = computed(() =>
+  localProviders.value.some(p => !p.isUnknown && !p.isDeleted)
 )
 const hasActiveProviders = computed(() =>
   knownProviders.value.some(p => !p.isDisabled)
@@ -404,6 +408,14 @@ function formatDate(dateStr?: string): string {
                       <!-- Action buttons (top right) -->
                       <div class="flex gap-2 shrink-0">
                         <UButton
+                          v-if="provider.isUnknown && hasNonUnknownProviders"
+                          icon="i-lucide-link"
+                          label="Match"
+                          color="primary"
+                          size="xs"
+                          @click="matchingProviderId = provider.matchId || provider.id"
+                        />
+                        <UButton
                           icon="i-lucide-trash-2"
                           label="Delete"
                           color="error"
@@ -525,5 +537,13 @@ function formatDate(dateStr?: string): string {
         </div>
       </template>
     </UModal>
+
+    <!-- Provider Match Dialog -->
+    <SeriesProviderMatchDialog
+      v-if="matchingProviderId"
+      :provider-id="matchingProviderId"
+      @close="matchingProviderId = null"
+      @matched="matchingProviderId = null"
+    />
   </div>
 </template>

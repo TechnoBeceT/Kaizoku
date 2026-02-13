@@ -266,6 +266,17 @@ type ProviderMatchChapter struct {
 	ChapterName   string   `json:"chapterName"`
 	ChapterNumber *float64 `json:"chapterNumber"`
 	MatchInfoID   *string  `json:"matchInfoId"`
+	LocalPages    int      `json:"localPages,omitempty"`
+	SourcePages   int      `json:"sourcePages,omitempty"`
+	PageMismatch  bool     `json:"pageMismatch,omitempty"`
+}
+
+// MatchResult is the response from SetProviderMatch.
+type MatchResult struct {
+	Success       bool                    `json:"success"`
+	Matched       int                     `json:"matched"`
+	Redownloads   int                     `json:"redownloads"`
+	MismatchFiles []ProviderMatchChapter  `json:"mismatchFiles,omitempty"`
 }
 
 // AugmentedResponse is the request body for AddSeries.

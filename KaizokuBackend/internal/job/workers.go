@@ -2450,6 +2450,58 @@ func (w *ImportSeriesWorker) matchOnDiskFiles(ctx context.Context, seriesID uuid
 
 	now := time.Now().UTC()
 
+	// matchFileToChapter attempts to match a file to a chapter in the provider.
+	// Returns true if a match was found and applied.
+	matchFileToChapter := func(p *ent.SeriesProvider, file *matchableFile) bool {
+		if file.ChapterNumber == nil {
+			return false
+		}
+		for i := range p.Chapters {
+			ch := &p.Chapters[i]
+			if ch.Number == nil || *ch.Number != *file.ChapterNumber {
+				continue
+			}
+			archivePath := filepath.Join(seriesDir, file.Filename)
+			if util.CheckArchive(archivePath) == types.ArchiveResultFine {
+				ch.Filename = file.Filename
+				ch.DownloadDate = &now
+				ch.ShouldDownload = false
+				ch.IsDeleted = false
+				file.matched = true
+				return true
+			}
+			break
+		}
+		return false
+	}
+
+	// saveProviderIfChanged persists updated chapters and recalculates ContinueAfterChapter.
+	saveProviderIfChanged := func(p *ent.SeriesProvider, changed bool) {
+		if !changed {
+			return
+		}
+		var maxDownloaded *float64
+		for _, ch := range p.Chapters {
+			if ch.Filename != "" && ch.Number != nil {
+				if maxDownloaded == nil || *ch.Number > *maxDownloaded {
+					n := *ch.Number
+					maxDownloaded = &n
+				}
+			}
+		}
+		update := w.Deps.DB.SeriesProvider.UpdateOneID(p.ID).
+			SetChapters(p.Chapters)
+		if maxDownloaded != nil {
+			update = update.SetContinueAfterChapter(*maxDownloaded)
+		} else {
+			update = update.SetContinueAfterChapter(0)
+		}
+		if err := update.Exec(ctx); err != nil {
+			log.Warn().Err(err).Str("provider", p.Provider).Msg("import: failed to update provider after file matching")
+		}
+	}
+
+	// Pass 1: strict match — provider + scanlator + language + chapter number
 	for _, p := range providers {
 		provName := strings.ToLower(p.Provider)
 		provScanlator := strings.ToLower(p.Scanlator)
@@ -2464,7 +2516,6 @@ func (w *ImportSeriesWorker) matchOnDiskFiles(ctx context.Context, seriesID uuid
 			fileScanlator := strings.ToLower(file.Scanlator)
 			fileLang := strings.ToLower(file.Language)
 
-			// Match by provider+scanlator+language
 			if fileProv != provName {
 				continue
 			}
@@ -2474,53 +2525,40 @@ func (w *ImportSeriesWorker) matchOnDiskFiles(ctx context.Context, seriesID uuid
 			if fileLang != provLang {
 				continue
 			}
-			if file.ChapterNumber == nil {
+
+			if matchFileToChapter(p, file) {
+				changed = true
+			}
+		}
+		saveProviderIfChanged(p, changed)
+	}
+
+	// Pass 2: relaxed match — provider + language only (ignore scanlator).
+	// Handles the common case where on-disk scanlator differs from Suwayomi's grouping.
+	for _, p := range providers {
+		provName := strings.ToLower(p.Provider)
+		provLang := strings.ToLower(p.Language)
+
+		changed := false
+		for _, file := range onDiskFiles {
+			if file.matched {
+				continue
+			}
+			fileProv := strings.ToLower(file.Provider)
+			fileLang := strings.ToLower(file.Language)
+
+			if fileProv != provName {
+				continue
+			}
+			if fileLang != provLang {
 				continue
 			}
 
-			// Find matching chapter in provider's chapter list
-			for i := range p.Chapters {
-				ch := &p.Chapters[i]
-				if ch.Number == nil || *ch.Number != *file.ChapterNumber {
-					continue
-				}
-				// Verify file actually exists and is valid
-				archivePath := filepath.Join(seriesDir, file.Filename)
-				if util.CheckArchive(archivePath) == types.ArchiveResultFine {
-					ch.Filename = file.Filename
-					ch.DownloadDate = &now
-					ch.ShouldDownload = false
-					ch.IsDeleted = false
-					file.matched = true
-					changed = true
-				}
-				break
+			if matchFileToChapter(p, file) {
+				changed = true
 			}
 		}
-
-		if changed {
-			// Recalculate ContinueAfterChapter from actual downloaded chapters
-			var maxDownloaded *float64
-			for _, ch := range p.Chapters {
-				if ch.Filename != "" && ch.Number != nil {
-					if maxDownloaded == nil || *ch.Number > *maxDownloaded {
-						n := *ch.Number
-						maxDownloaded = &n
-					}
-				}
-			}
-
-			update := w.Deps.DB.SeriesProvider.UpdateOneID(p.ID).
-				SetChapters(p.Chapters)
-			if maxDownloaded != nil {
-				update = update.SetContinueAfterChapter(*maxDownloaded)
-			} else {
-				update = update.SetContinueAfterChapter(0)
-			}
-			if err := update.Exec(ctx); err != nil {
-				log.Warn().Err(err).Str("provider", p.Provider).Msg("import: failed to update provider after file matching")
-			}
-		}
+		saveProviderIfChanged(p, changed)
 	}
 
 	// Handle unmatched files — create Unknown providers for orphan archives

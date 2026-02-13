@@ -4,6 +4,7 @@ import type {
   SeriesInfo,
   SeriesExtendedInfo,
   ProviderMatch,
+  MatchResult,
   AugmentedResponse,
   LatestSeriesInfo,
 } from '~/types'

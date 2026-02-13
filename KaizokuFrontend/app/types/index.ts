@@ -434,12 +434,22 @@ export interface ProviderMatchChapter {
   chapterName: string
   chapterNumber?: number
   matchInfoId?: string
+  localPages?: number
+  sourcePages?: number
+  pageMismatch?: boolean
 }
 
 export interface ProviderMatch {
   id: string
   matchInfos: MatchInfo[]
   chapters: ProviderMatchChapter[]
+}
+
+export interface MatchResult {
+  success: boolean
+  matched: number
+  redownloads: number
+  mismatchFiles?: ProviderMatchChapter[]
 }
 
 export interface DownloadCardInfo {

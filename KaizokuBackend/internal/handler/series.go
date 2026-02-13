@@ -764,6 +764,7 @@ func (h *SeriesHandler) GetProviderMatch(c echo.Context) error {
 }
 
 // SetProviderMatch applies chapter-to-provider matching.
+// Renames files, updates ComicInfo.xml, and verifies page counts.
 // POST /api/serie/match
 func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 	var pm types.ProviderMatch
@@ -780,17 +781,17 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 
 	unknown, err := h.db.SeriesProvider.Get(ctx, unknownID)
 	if err != nil {
-		return c.JSON(http.StatusOK, false)
+		return c.JSON(http.StatusOK, types.MatchResult{Success: false})
 	}
 
 	s, err := h.db.Series.Get(ctx, unknown.SeriesID)
 	if err != nil {
-		return c.JSON(http.StatusOK, false)
+		return c.JSON(http.StatusOK, types.MatchResult{Success: false})
 	}
 
 	providers, err := s.QueryProviders().All(ctx)
 	if err != nil {
-		return c.JSON(http.StatusOK, false)
+		return c.JSON(http.StatusOK, types.MatchResult{Success: false})
 	}
 
 	// Build provider ID → provider map
@@ -805,7 +806,13 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 		storageFolder = settings.StorageFolder
 	}
 
-	updated := false
+	seriesDir := ""
+	if storageFolder != "" && s.StoragePath != "" {
+		seriesDir = filepath.Join(storageFolder, s.StoragePath)
+	}
+
+	result := types.MatchResult{Success: true}
+
 	for _, chap := range pm.Chapters {
 		if chap.MatchInfoID == nil {
 			continue
@@ -847,6 +854,47 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 
 		ch := unknown.Chapters[chIdx]
 
+		// Page count verification
+		if seriesDir != "" {
+			archivePath := filepath.Join(seriesDir, ch.Filename)
+			localPages := util.CountCBZPages(archivePath)
+			sourcePages := 0
+			if target.Chapters[dstIdx].PageCount != nil {
+				sourcePages = *target.Chapters[dstIdx].PageCount
+			}
+
+			// If source reports page count and local file has >20% fewer pages, flag for re-download
+			if sourcePages > 0 && localPages > 0 && float64(localPages) < float64(sourcePages)*0.8 {
+				result.Redownloads++
+				result.MismatchFiles = append(result.MismatchFiles, types.ProviderMatchChapter{
+					Filename:      ch.Filename,
+					ChapterNumber: chap.ChapterNumber,
+					ChapterName:   chap.ChapterName,
+					LocalPages:    localPages,
+					SourcePages:   sourcePages,
+					PageMismatch:  true,
+				})
+				// Flag chapter for re-download instead of transferring
+				target.Chapters[dstIdx].ShouldDownload = true
+				target.Chapters[dstIdx].Filename = ""
+				target.Chapters[dstIdx].DownloadDate = nil
+
+				// Remove the bad file from unknown provider
+				unknown.Chapters = append(unknown.Chapters[:chIdx], unknown.Chapters[chIdx+1:]...)
+
+				// Delete the incomplete archive from disk
+				_ = os.Remove(archivePath)
+
+				// Save target provider
+				if err := h.db.SeriesProvider.UpdateOneID(target.ID).
+					SetChapters(target.Chapters).
+					Exec(ctx); err != nil {
+					log.Warn().Err(err).Msg("failed to update target provider for re-download")
+				}
+				continue
+			}
+		}
+
 		// Rename the file
 		maxChap := maxChapterNumber(target.Chapters)
 		newBase := makeFileNameSafe(target.Provider, target.Scanlator, target.Title, target.Language,
@@ -854,8 +902,7 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 		ext := path.Ext(ch.Filename)
 		newFilename := newBase + ext
 
-		if storageFolder != "" && s.StoragePath != "" {
-			seriesDir := filepath.Join(storageFolder, s.StoragePath)
+		if seriesDir != "" {
 			originalPath := filepath.Join(seriesDir, ch.Filename)
 			newPath := filepath.Join(seriesDir, newFilename)
 			if originalPath != newPath {
@@ -863,6 +910,10 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 					log.Warn().Err(err).Str("from", originalPath).Str("to", newPath).Msg("failed to rename matched chapter file")
 				}
 			}
+
+			// Update ComicInfo.xml inside the CBZ
+			cbzPath := filepath.Join(seriesDir, newFilename)
+			h.updateMatchedComicInfo(ctx, cbzPath, s, target, &target.Chapters[dstIdx])
 		}
 
 		// Update target chapter
@@ -880,7 +931,7 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 			log.Warn().Err(err).Msg("failed to update target provider chapters")
 		}
 
-		updated = true
+		result.Matched++
 	}
 
 	if len(unknown.Chapters) == 0 {
@@ -888,7 +939,7 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 		if err := h.db.SeriesProvider.DeleteOneID(unknown.ID).Exec(ctx); err != nil {
 			log.Warn().Err(err).Msg("failed to delete empty unknown provider")
 		}
-	} else if updated {
+	} else if result.Matched > 0 || result.Redownloads > 0 {
 		if err := h.db.SeriesProvider.UpdateOneID(unknown.ID).
 			SetChapters(unknown.Chapters).
 			Exec(ctx); err != nil {
@@ -896,7 +947,221 @@ func (h *SeriesHandler) SetProviderMatch(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, true)
+	// Save kaizoku.json after matching
+	if s.StoragePath != "" && storageFolder != "" {
+		h.saveKaizokuJSON(ctx, s.ID, storageFolder)
+	}
+
+	return c.JSON(http.StatusOK, result)
+}
+
+// updateMatchedComicInfo updates the ComicInfo.xml inside a CBZ after matching to a known provider.
+func (h *SeriesHandler) updateMatchedComicInfo(ctx context.Context, cbzPath string, s *ent.Series, target *ent.SeriesProvider, ch *types.Chapter) {
+	meta := util.ChapterMeta{
+		SeriesTitle:   s.Title,
+		ProviderTitle: target.Title,
+		ChapterNumber: ch.Number,
+		ChapterName:   ch.Name,
+		ChapterCount:  len(target.Chapters),
+		Language:      target.Language,
+		Provider:      target.Provider,
+		Scanlator:     target.Scanlator,
+		Genre:         s.Genre,
+	}
+	if target.Author != nil {
+		meta.Author = *target.Author
+	}
+	if target.Artist != nil {
+		meta.Artist = *target.Artist
+	}
+	if s.Type != nil {
+		meta.Type = *s.Type
+	}
+	if target.URL != nil && *target.URL != "" {
+		meta.URL = *target.URL
+	}
+	if ch.PageCount != nil {
+		meta.PageCount = *ch.PageCount
+	}
+	if ch.ProviderUploadDate != nil {
+		meta.UploadDate = ch.ProviderUploadDate
+	}
+
+	ci := util.NewComicInfo(meta)
+	if err := util.UpdateCBZComicInfo(cbzPath, ci); err != nil {
+		log.Warn().Err(err).Str("path", cbzPath).Msg("failed to update ComicInfo.xml after match")
+	}
+}
+
+// autoMatchUnknownProviders transfers downloaded files from Unknown providers to matching known providers.
+// Called after adding new providers to a series. Matches by provider name + language.
+func (h *SeriesHandler) autoMatchUnknownProviders(ctx context.Context, s *ent.Series, settings *types.Settings) {
+	allProviders, err := h.db.SeriesProvider.Query().
+		Where(seriesprovider.SeriesIDEQ(s.ID)).
+		All(ctx)
+	if err != nil {
+		return
+	}
+
+	var unknowns []*ent.SeriesProvider
+	var knowns []*ent.SeriesProvider
+	for _, p := range allProviders {
+		if p.IsUnknown {
+			unknowns = append(unknowns, p)
+		} else {
+			knowns = append(knowns, p)
+		}
+	}
+	if len(unknowns) == 0 || len(knowns) == 0 {
+		return
+	}
+
+	storageFolder := ""
+	if settings != nil {
+		storageFolder = settings.StorageFolder
+	}
+	seriesDir := ""
+	if storageFolder != "" && s.StoragePath != "" {
+		seriesDir = filepath.Join(storageFolder, s.StoragePath)
+	}
+
+	for _, unknown := range unknowns {
+		unknownProv := strings.ToLower(unknown.Provider)
+		unknownLang := strings.ToLower(unknown.Language)
+
+		// Find a matching known provider (by provider name + language)
+		var target *ent.SeriesProvider
+		for _, k := range knowns {
+			if strings.ToLower(k.Provider) == unknownProv && strings.ToLower(k.Language) == unknownLang {
+				target = k
+				break
+			}
+		}
+		// Also try matching by language only if the unknown provider name is "Unknown"
+		if target == nil && unknownProv == "unknown" {
+			for _, k := range knowns {
+				if strings.ToLower(k.Language) == unknownLang {
+					target = k
+					break
+				}
+			}
+		}
+		if target == nil {
+			continue
+		}
+
+		transferred := 0
+		remaining := make([]types.Chapter, 0, len(unknown.Chapters))
+
+		for _, ch := range unknown.Chapters {
+			if ch.Filename == "" || ch.Number == nil {
+				remaining = append(remaining, ch)
+				continue
+			}
+
+			// Find matching chapter number in target
+			dstIdx := -1
+			for i, tch := range target.Chapters {
+				if tch.Number != nil && *tch.Number == *ch.Number {
+					dstIdx = i
+					break
+				}
+			}
+			if dstIdx < 0 {
+				remaining = append(remaining, ch)
+				continue
+			}
+
+			// Page count verification
+			if seriesDir != "" {
+				archivePath := filepath.Join(seriesDir, ch.Filename)
+				localPages := util.CountCBZPages(archivePath)
+				sourcePages := 0
+				if target.Chapters[dstIdx].PageCount != nil {
+					sourcePages = *target.Chapters[dstIdx].PageCount
+				}
+				if sourcePages > 0 && localPages > 0 && float64(localPages) < float64(sourcePages)*0.8 {
+					// Mark for re-download, discard the bad file
+					target.Chapters[dstIdx].ShouldDownload = true
+					_ = os.Remove(archivePath)
+					transferred++ // Still counts as handled
+					continue
+				}
+			}
+
+			// Rename file to target naming convention
+			maxChap := maxChapterNumber(target.Chapters)
+			newBase := makeFileNameSafe(target.Provider, target.Scanlator, target.Title, target.Language,
+				target.Chapters[dstIdx].Number, target.Chapters[dstIdx].Name, maxChap)
+			ext := path.Ext(ch.Filename)
+			newFilename := newBase + ext
+
+			if seriesDir != "" {
+				originalPath := filepath.Join(seriesDir, ch.Filename)
+				newPath := filepath.Join(seriesDir, newFilename)
+				if originalPath != newPath {
+					if err := os.Rename(originalPath, newPath); err != nil {
+						log.Warn().Err(err).Str("from", originalPath).Str("to", newPath).Msg("auto-match: failed to rename")
+						remaining = append(remaining, ch)
+						continue
+					}
+				}
+
+				// Update ComicInfo.xml
+				cbzPath := filepath.Join(seriesDir, newFilename)
+				h.updateMatchedComicInfo(ctx, cbzPath, s, target, &target.Chapters[dstIdx])
+			}
+
+			// Transfer to target
+			target.Chapters[dstIdx].Filename = newFilename
+			target.Chapters[dstIdx].DownloadDate = ch.DownloadDate
+			target.Chapters[dstIdx].ShouldDownload = false
+			transferred++
+		}
+
+		if transferred == 0 {
+			continue
+		}
+
+		// Save target provider
+		var maxDownloaded *float64
+		for _, ch := range target.Chapters {
+			if ch.Filename != "" && ch.Number != nil {
+				if maxDownloaded == nil || *ch.Number > *maxDownloaded {
+					n := *ch.Number
+					maxDownloaded = &n
+				}
+			}
+		}
+		update := h.db.SeriesProvider.UpdateOneID(target.ID).
+			SetChapters(target.Chapters)
+		if maxDownloaded != nil {
+			update = update.SetContinueAfterChapter(*maxDownloaded)
+		}
+		if err := update.Exec(ctx); err != nil {
+			log.Warn().Err(err).Str("provider", target.Provider).Msg("auto-match: failed to save target provider")
+		}
+
+		// Update or delete unknown provider
+		if len(remaining) == 0 {
+			if err := h.db.SeriesProvider.DeleteOneID(unknown.ID).Exec(ctx); err != nil {
+				log.Warn().Err(err).Msg("auto-match: failed to delete empty unknown provider")
+			}
+		} else {
+			if err := h.db.SeriesProvider.UpdateOneID(unknown.ID).
+				SetChapters(remaining).
+				Exec(ctx); err != nil {
+				log.Warn().Err(err).Msg("auto-match: failed to update unknown provider")
+			}
+		}
+
+		log.Info().
+			Str("series", s.Title).
+			Str("target", target.Provider).
+			Int("transferred", transferred).
+			Int("remaining", len(remaining)).
+			Msg("auto-matched unknown provider to known source")
+	}
 }
 
 // AddSeries creates a new series from augmented data.
@@ -1068,6 +1333,11 @@ func (h *SeriesHandler) AddSeries(c echo.Context) error {
 			}
 		}
 	}
+
+	// Auto-match Unknown providers to newly created known providers.
+	// When a user adds a source to a series that has an Unknown provider from import,
+	// try to automatically transfer downloaded files from Unknown → new provider.
+	h.autoMatchUnknownProviders(ctx, dbSeries, settings)
 
 	// Enqueue GetChapters jobs for each non-disabled, non-unknown provider
 	if !req.DisableJobs {

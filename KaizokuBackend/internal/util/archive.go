@@ -319,6 +319,24 @@ func CheckArchive(path string) types.ArchiveResult {
 	return types.ArchiveResultFine
 }
 
+// CountCBZPages counts the number of image files inside a CBZ archive.
+// Returns 0 if the file cannot be read.
+func CountCBZPages(path string) int {
+	r, err := zip.OpenReader(path)
+	if err != nil {
+		return 0
+	}
+	defer r.Close()
+
+	count := 0
+	for _, f := range r.File {
+		if isImageFile(strings.ToLower(f.Name)) {
+			count++
+		}
+	}
+	return count
+}
+
 // isImageFile checks if a filename has an image extension.
 func isImageFile(name string) bool {
 	ext := strings.ToLower(filepath.Ext(name))

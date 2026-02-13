@@ -5,6 +5,7 @@ import type {
   SeriesInfo,
   SeriesExtendedInfo,
   ProviderMatch,
+  MatchResult,
   AugmentedResponse,
   LatestSeriesInfo,
   SearchSource,
@@ -43,8 +44,8 @@ export const seriesService = {
     return apiClient.get<ProviderMatch | null>(`/api/serie/match/${providerId}`)
   },
 
-  async setMatch(providerMatch: ProviderMatch): Promise<boolean> {
-    return apiClient.post<boolean>('/api/serie/match', providerMatch)
+  async setMatch(providerMatch: ProviderMatch): Promise<MatchResult> {
+    return apiClient.post<MatchResult>('/api/serie/match', providerMatch)
   },
 
   async updateSeries(seriesData: SeriesExtendedInfo): Promise<SeriesExtendedInfo> {
