@@ -1847,7 +1847,7 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 			IsUninstalled:        p.IsUninstalled,
 			Status:               types.SeriesStatus(p.Status),
 			ContinueAfterChapter: p.ContinueAfterChapter,
-			MatchID:              s.ID.String(),
+			MatchID:              p.ID.String(),
 		}
 
 		if p.ChapterCount != nil {

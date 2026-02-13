@@ -413,7 +413,7 @@ function formatDate(dateStr?: string): string {
                           label="Match"
                           color="primary"
                           size="xs"
-                          @click="matchingProviderId = provider.matchId || provider.id"
+                          @click="matchingProviderId = provider.id"
                         />
                         <UButton
                           icon="i-lucide-trash-2"
