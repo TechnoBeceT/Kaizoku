@@ -34,12 +34,18 @@ type ProgressBroadcaster interface {
 	BroadcastProgress(id string, jobType int, status int, percentage float64, message string, param interface{})
 }
 
+// SettingsReader provides access to DB settings.
+type SettingsReader interface {
+	Get(ctx context.Context) (*types.Settings, error)
+}
+
 // Deps holds shared dependencies injected into job workers.
 type Deps struct {
 	DB            *ent.Client
 	Suwayomi      *suwayomi.Client
 	Progress      ProgressBroadcaster
 	Config        *config.Config
+	Settings      SettingsReader                   // DB settings (UI-configured values)
 	DownloadQueue *DownloadDispatcher // Custom download queue (replaces River for downloads)
 	RiverClient   RiverInserter       // For enqueuing River jobs from shared functions
 }
@@ -47,6 +53,37 @@ type Deps struct {
 // RiverInserter is the interface for inserting River jobs (allows both handler and worker context).
 type RiverInserter interface {
 	Insert(ctx context.Context, args river.JobArgs, opts *river.InsertOpts) (*rivertype.JobInsertResult, error)
+}
+
+// getRetrySettings returns chapter retry max and delay from DB settings, falling back to config defaults.
+func (d *Deps) getRetrySettings(ctx context.Context) (maxRetries int, retryDelay time.Duration) {
+	maxRetries = d.Config.Settings.ChapterFailRetries
+	retryDelay = 30 * time.Minute
+	if dur, err := time.ParseDuration(d.Config.Settings.ChapterFailRetryTime); err == nil {
+		retryDelay = dur
+	}
+
+	if d.Settings != nil {
+		if s, err := d.Settings.Get(ctx); err == nil && s != nil {
+			maxRetries = s.ChapterDownloadFailRetries
+			if dur, err := parseTimeSpan(s.ChapterDownloadFailRetryTime); err == nil {
+				retryDelay = dur
+			}
+		}
+	}
+	return
+}
+
+// parseTimeSpan parses "HH:MM:SS" (.NET TimeSpan format) into a Go duration.
+func parseTimeSpan(s string) (time.Duration, error) {
+	parts := strings.Split(s, ":")
+	if len(parts) != 3 {
+		return 0, fmt.Errorf("invalid timespan: %s", s)
+	}
+	hours, _ := strconv.Atoi(parts[0])
+	minutes, _ := strconv.Atoi(parts[1])
+	seconds, _ := strconv.Atoi(parts[2])
+	return time.Duration(hours)*time.Hour + time.Duration(minutes)*time.Minute + time.Duration(seconds)*time.Second, nil
 }
 
 // ============================================================
@@ -375,7 +412,7 @@ func (d *Deps) enqueueNextFallback(ctx context.Context, args types.DownloadChapt
 
 // scheduleFullCascadeRetry rebuilds the full provider list and schedules a retry after a delay.
 func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.DownloadChapterArgs) {
-	maxRetries := d.Config.Settings.ChapterFailRetries
+	maxRetries, retryDelay := d.getRetrySettings(ctx)
 	if args.CascadeRetries >= maxRetries {
 		log.Warn().
 			Str("title", args.Title).
@@ -434,11 +471,6 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 			SuwayomiID: sp.SuwayomiID,
 			Importance: sp.Importance,
 		})
-	}
-
-	retryDelay, err := time.ParseDuration(d.Config.Settings.ChapterFailRetryTime)
-	if err != nil {
-		retryDelay = 30 * time.Minute
 	}
 
 	newArgs := types.DownloadChapterArgs{
@@ -509,10 +541,7 @@ func (d *Deps) handleDownloadSuccess(ctx context.Context, args types.DownloadCha
 			continue
 		}
 
-		retryDelay, _ := time.ParseDuration(d.Config.Settings.ChapterFailRetryTime)
-		if retryDelay == 0 {
-			retryDelay = 30 * time.Minute
-		}
+		_, retryDelay := d.getRetrySettings(ctx)
 
 		repArgs := types.DownloadChapterArgs{
 			SeriesID:            args.SeriesID,
@@ -644,12 +673,8 @@ func (d *Deps) handleReplacementSuccess(ctx context.Context, args types.Download
 
 // handleReplacementFailure retries the replacement or tries the next importance level.
 func (d *Deps) handleReplacementFailure(ctx context.Context, args types.DownloadChapterArgs) {
-	maxRetries := d.Config.Settings.ChapterFailRetries
+	maxRetries, retryDelay := d.getRetrySettings(ctx)
 	if args.ReplacementRetry < maxRetries {
-		retryDelay, _ := time.ParseDuration(d.Config.Settings.ChapterFailRetryTime)
-		if retryDelay == 0 {
-			retryDelay = 30 * time.Minute
-		}
 
 		newArgs := args
 		newArgs.ReplacementRetry++
@@ -699,10 +724,7 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 			continue
 		}
 
-		retryDelay, _ := time.ParseDuration(d.Config.Settings.ChapterFailRetryTime)
-		if retryDelay == 0 {
-			retryDelay = 30 * time.Minute
-		}
+		_, nextRetryDelay := d.getRetrySettings(ctx)
 
 		newArgs := types.DownloadChapterArgs{
 			SeriesID:            args.SeriesID,
@@ -726,7 +748,7 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 			ReplacementRetry:    0,
 		}
 
-		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
+		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(nextRetryDelay)); err != nil {
 			log.Warn().Err(err).Msg("failed to schedule next replacement provider")
 			continue
 		}

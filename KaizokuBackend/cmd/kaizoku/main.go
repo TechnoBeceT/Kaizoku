@@ -79,9 +79,12 @@ func main() {
 	// Create progress hub (shared between job manager and server)
 	hub := ws.NewHub()
 
+	// Create settings service (shared between job manager and server)
+	ss := settingssvc.NewService(db, cfg, sw)
+
 	// Create River job manager
 	ctx := context.Background()
-	jobMgr, err := job.NewManager(ctx, cfg, db, sw, hub)
+	jobMgr, err := job.NewManager(ctx, cfg, db, sw, hub, ss)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create job manager")
 	}
@@ -99,7 +102,6 @@ func main() {
 	// Sync settings to Suwayomi on startup (matches .NET behavior).
 	// Runs in background because Suwayomi may still be starting up.
 	go func() {
-		ss := settingssvc.NewService(db, cfg, sw)
 		// Wait for Suwayomi to become responsive before syncing
 		for i := 0; i < 30; i++ {
 			select {

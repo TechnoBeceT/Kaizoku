@@ -21,8 +21,8 @@ import (
 type DownloadDispatcher struct {
 	db       *ent.Client
 	deps     *Deps
-	maxTotal int // max concurrent downloads globally
-	maxGroup int // max concurrent downloads per provider
+	maxTotal int // max concurrent downloads globally (config fallback)
+	maxGroup int // max concurrent downloads per provider (config fallback)
 
 	mu      sync.Mutex
 	running map[string]int // group_key -> count of running downloads
@@ -45,6 +45,23 @@ func NewDownloadDispatcher(db *ent.Client, deps *Deps, maxTotal, maxGroup int) *
 		maxGroup: maxGroup,
 		running:  make(map[string]int),
 	}
+}
+
+// getLimits returns the current maxTotal and maxGroup, preferring DB settings over config defaults.
+func (d *DownloadDispatcher) getLimits(ctx context.Context) (maxTotal, maxGroup int) {
+	maxTotal = d.maxTotal
+	maxGroup = d.maxGroup
+	if d.deps != nil && d.deps.Settings != nil {
+		if s, err := d.deps.Settings.Get(ctx); err == nil && s != nil {
+			if s.NumberOfSimultaneousDownloads > 0 {
+				maxTotal = s.NumberOfSimultaneousDownloads
+			}
+			if s.NumberOfSimultaneousDownloadsPerProvider > 0 {
+				maxGroup = s.NumberOfSimultaneousDownloadsPerProvider
+			}
+		}
+	}
+	return
 }
 
 // Run starts the dispatch loop. Blocks until ctx is cancelled.
@@ -111,8 +128,10 @@ func (d *DownloadDispatcher) resetStaleRunning(ctx context.Context) {
 
 // dispatch is the core polling function called every 500ms.
 func (d *DownloadDispatcher) dispatch(ctx context.Context) {
+	maxTotal, maxGroup := d.getLimits(ctx)
+
 	d.mu.Lock()
-	available := d.maxTotal - d.total
+	available := maxTotal - d.total
 	if available <= 0 {
 		d.mu.Unlock()
 		return
@@ -124,31 +143,52 @@ func (d *DownloadDispatcher) dispatch(ctx context.Context) {
 	}
 	d.mu.Unlock()
 
-	// Query eligible items: waiting, scheduled_at <= now
-	items, err := d.db.DownloadQueueItem.Query().
+	// Get distinct group keys with eligible items to prevent source starvation.
+	// A simple global Limit query would starve sources with higher chapter numbers.
+	groupKeys, err := d.db.DownloadQueueItem.Query().
 		Where(
 			downloadqueueitem.StatusEQ(types.DLStatusWaiting),
 			downloadqueueitem.ScheduledAtLTE(time.Now()),
 		).
-		Order(
-			ent.Asc(downloadqueueitem.FieldPriority),
-			ent.Asc(downloadqueueitem.FieldScheduledAt),
-			ent.Asc(downloadqueueitem.FieldID),
-		).
-		Limit(available * 3). // Fetch extra for fair-share filtering
-		All(ctx)
-	if err != nil || len(items) == 0 {
+		Unique(true).
+		Select(downloadqueueitem.FieldGroupKey).
+		Strings(ctx)
+	if err != nil || len(groupKeys) == 0 {
 		return
 	}
 
-	// Group items by provider (group_key) preserving order within each group
+	// Fetch top items per group, respecting per-group running limits
 	grouped := make(map[string][]*ent.DownloadQueueItem)
 	var groupOrder []string
-	for _, item := range items {
-		if _, exists := grouped[item.GroupKey]; !exists {
-			groupOrder = append(groupOrder, item.GroupKey)
+	for _, gk := range groupKeys {
+		slotsLeft := maxGroup - runningSnapshot[gk]
+		if slotsLeft <= 0 {
+			continue
 		}
-		grouped[item.GroupKey] = append(grouped[item.GroupKey], item)
+
+		items, err := d.db.DownloadQueueItem.Query().
+			Where(
+				downloadqueueitem.StatusEQ(types.DLStatusWaiting),
+				downloadqueueitem.ScheduledAtLTE(time.Now()),
+				downloadqueueitem.GroupKeyEQ(gk),
+			).
+			Order(
+				ent.Asc(downloadqueueitem.FieldPriority),
+				ent.Asc(downloadqueueitem.FieldScheduledAt),
+				ent.Asc(downloadqueueitem.FieldID),
+			).
+			Limit(slotsLeft).
+			All(ctx)
+		if err != nil || len(items) == 0 {
+			continue
+		}
+
+		grouped[gk] = items
+		groupOrder = append(groupOrder, gk)
+	}
+
+	if len(groupOrder) == 0 {
+		return
 	}
 
 	// Fair-share round-robin: take 1 from each group in turn,
@@ -167,7 +207,7 @@ func (d *DownloadDispatcher) dispatch(ctx context.Context) {
 			}
 
 			currentRunning := runningSnapshot[groupKey]
-			if currentRunning >= d.maxGroup {
+			if currentRunning >= maxGroup {
 				continue
 			}
 

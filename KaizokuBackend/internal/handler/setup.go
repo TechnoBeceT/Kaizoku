@@ -17,6 +17,7 @@ import (
 	"github.com/technobecet/kaizoku-go/internal/job"
 	"github.com/technobecet/kaizoku-go/internal/service/suwayomi"
 	"github.com/technobecet/kaizoku-go/internal/types"
+	"github.com/technobecet/kaizoku-go/internal/util"
 )
 
 type SetupHandler struct {
@@ -389,19 +390,20 @@ func (h *SetupHandler) GetImports(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
 
-	// Build set of existing series storage paths to detect already-imported
+	// Build set of existing series storage paths to detect already-imported.
+	// Normalize paths so .NET-style (Unicode replacements) and Go-style paths match.
 	allSeries, _ := h.db.Series.Query().All(ctx)
 	existingPaths := make(map[string]bool)
 	for _, s := range allSeries {
 		if s.StoragePath != "" {
-			existingPaths[strings.ToLower(s.StoragePath)] = true
+			existingPaths[util.NormalizePathForComparison(s.StoragePath)] = true
 		}
 	}
 
 	var result []types.ImportInfo
 	for _, imp := range imports {
 		info := importEntryToInfo(imp)
-		impPath := strings.ToLower(imp.ID)
+		impPath := util.NormalizePathForComparison(imp.ID)
 		inLibrary := existingPaths[impPath]
 
 		// If series with this path already exists in library, mark as Already Imported

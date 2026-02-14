@@ -26,7 +26,7 @@ type Manager struct {
 }
 
 // NewManager creates a River client (for non-download jobs) and a custom DownloadDispatcher.
-func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suwayomi.Client, progress ProgressBroadcaster) (*Manager, error) {
+func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suwayomi.Client, progress ProgressBroadcaster, settings SettingsReader) (*Manager, error) {
 	dsn := cfg.Database.DSN()
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -39,6 +39,7 @@ func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suw
 		Suwayomi: sw,
 		Progress: progress,
 		Config:   cfg,
+		Settings: settings,
 	}
 
 	// Register River workers (non-download jobs only)

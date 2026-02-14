@@ -8,8 +8,68 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/text/unicode/norm"
+
 	"github.com/technobecet/kaizoku-go/internal/types"
 )
+
+// invalidPathCharMap maps invalid filename characters to visually similar Unicode
+// replacements, matching the .NET Kaizoku behavior. This preserves readability
+// while keeping paths filesystem-safe.
+var invalidPathCharMap = [][2]string{
+	{"*", "\u2605"},  // ★  Black Star
+	{"|", "\u00a6"},  // ¦  Broken Bar
+	{"\\", "\u29F9"}, // ⟹  Big Reverse Solidus
+	{"/", "\u2044"},  // ⁄  Fraction Slash
+	{":", "\u0589"},   // ։  Armenian Full Stop
+	{"\"", "\u2033"}, // ″  Double Prime
+	{">", "\u203a"},  // ›  Single Right-Pointing Angle Quotation
+	{"<", "\u2039"},  // ‹  Single Left-Pointing Angle Quotation
+	{"?", "\uff1f"},  // ？ Fullwidth Question Mark
+}
+
+// ReplaceInvalidPathCharacters replaces invalid filename/path characters with
+// Unicode lookalikes (matching .NET Kaizoku behavior).
+func ReplaceInvalidPathCharacters(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, pair := range invalidPathCharMap {
+		s = strings.ReplaceAll(s, pair[0], pair[1])
+	}
+	s = strings.ReplaceAll(s, "...", "\u2026") // … Ellipsis
+	s = strings.Trim(s, ".")
+	return strings.TrimSpace(norm.NFC.String(s))
+}
+
+// RestoreOriginalPathCharacters reverses the Unicode replacements back to
+// original characters. Used for comparison and display.
+func RestoreOriginalPathCharacters(s string) string {
+	if s == "" {
+		return s
+	}
+	for _, pair := range invalidPathCharMap {
+		s = strings.ReplaceAll(s, pair[1], pair[0])
+	}
+	s = strings.ReplaceAll(s, "\u2026", "...") // … → ...
+	return strings.TrimSpace(s)
+}
+
+// NormalizePathForComparison strips all Unicode lookalike replacements and
+// lowercases for path comparison. This allows matching between .NET-style
+// paths (with Unicode replacements) and Go-style paths (with chars removed).
+func NormalizePathForComparison(s string) string {
+	s = strings.ToLower(s)
+	// Remove both the original invalid chars and their Unicode replacements
+	for _, pair := range invalidPathCharMap {
+		s = strings.ReplaceAll(s, pair[0], "")
+		s = strings.ReplaceAll(s, pair[1], "")
+	}
+	s = strings.ReplaceAll(s, "\u2026", "")
+	// Collapse multiple spaces into one
+	fields := strings.Fields(s)
+	return strings.Join(fields, " ")
+}
 
 // Archive file extensions.
 var archiveExts = map[string]bool{
@@ -252,8 +312,15 @@ func LoadKaizokuJSON(dirPath string) *types.KaizokuInfo {
 	return &info
 }
 
-// MakeFolderNameSafe removes unsafe characters from a folder name.
+// MakeFolderNameSafe replaces unsafe characters in a folder name with Unicode
+// lookalikes (matching .NET Kaizoku behavior). Returns "Unknown" for empty input.
 func MakeFolderNameSafe(name string) string {
-	unsafe := regexp.MustCompile(`[<>:"/\\|?*]`)
-	return strings.TrimSpace(unsafe.ReplaceAllString(name, ""))
+	if strings.TrimSpace(name) == "" {
+		return "Unknown"
+	}
+	safe := ReplaceInvalidPathCharacters(name)
+	if strings.TrimSpace(safe) == "" {
+		return "Unknown"
+	}
+	return safe
 }

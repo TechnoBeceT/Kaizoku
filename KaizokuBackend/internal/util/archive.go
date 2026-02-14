@@ -202,11 +202,10 @@ func GeneratePageFilename(provider, scanlator, language, title string, chapterNu
 	return base + " " + pageStr + ext
 }
 
-var invalidChars = regexp.MustCompile(`[<>:"/\\|?*]`)
 var multiSpaceRe = regexp.MustCompile(`\s+`)
 
 func sanitizeFilename(name string) string {
-	return invalidChars.ReplaceAllString(name, "")
+	return ReplaceInvalidPathCharacters(name)
 }
 
 func collapseSpaces(s string) string {

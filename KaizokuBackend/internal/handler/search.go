@@ -37,6 +37,16 @@ type searchCacheEntry struct {
 	expiresAt time.Time
 }
 
+// getSearchConcurrency returns the number of simultaneous searches from DB settings, falling back to 10.
+func (h *SearchHandler) getSearchConcurrency(ctx context.Context) int {
+	if h.settings != nil {
+		if s, err := h.settings.Get(ctx); err == nil && s != nil && s.NumberOfSimultaneousSearches > 0 {
+			return s.NumberOfSimultaneousSearches
+		}
+	}
+	return 10
+}
+
 func (h *SearchHandler) SearchSeries(c echo.Context) error {
 	keyword := c.QueryParam("keyword")
 	if keyword == "" {
@@ -121,7 +131,7 @@ func (h *SearchHandler) SearchSeries(c echo.Context) error {
 
 	var mu sync.Mutex
 	var results []searchResult
-	sem := make(chan struct{}, 10)
+	sem := make(chan struct{}, h.getSearchConcurrency(noRetryCtx))
 	var wg sync.WaitGroup
 
 	for _, src := range filteredSources {
@@ -291,7 +301,7 @@ func (h *SearchHandler) AugmentSeries(c echo.Context) error {
 
 	var mu sync.Mutex
 	var fetched []augResult
-	sem := make(chan struct{}, 10)
+	sem := make(chan struct{}, h.getSearchConcurrency(ctx))
 	var wg sync.WaitGroup
 
 	for _, ls := range linkedSeries {
