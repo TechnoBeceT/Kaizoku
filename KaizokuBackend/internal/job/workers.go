@@ -1980,6 +1980,44 @@ func (w *SearchProvidersWorker) Work(ctx context.Context, job *river.Job[SearchP
 		return nil
 	}
 
+	// Build set of existing series storage paths to skip already-imported series.
+	// This avoids wasting source API requests on series already in the library.
+	allSeries, _ := w.Deps.DB.Series.Query().All(ctx)
+	existingPaths := make(map[string]bool)
+	for _, s := range allSeries {
+		if s.StoragePath != "" {
+			existingPaths[util.NormalizePathForComparison(s.StoragePath)] = true
+		}
+	}
+
+	// Filter out imports that already have a matching series in the library
+	var toSearch []*ent.ImportEntry
+	for _, imp := range imports {
+		normPath := util.NormalizePathForComparison(imp.ID)
+		if existingPaths[normPath] {
+			// Mark as already imported — no need to search
+			_, err := w.Deps.DB.ImportEntry.UpdateOneID(imp.ID).
+				SetStatus(int(types.ImportStatusDoNotChange)).
+				SetAction(int(types.ImportActionSkip)).
+				Save(ctx)
+			if err != nil {
+				log.Warn().Err(err).Str("path", imp.ID).Msg("failed to mark import as already imported")
+			}
+		} else {
+			toSearch = append(toSearch, imp)
+		}
+	}
+
+	log.Info().Int("total", len(imports)).Int("skipped", len(imports)-len(toSearch)).Int("toSearch", len(toSearch)).
+		Msg("filtered already-imported series from search")
+
+	if len(toSearch) == 0 {
+		w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeSearchProviders),
+			int(types.ProgressStatusCompleted), 100, "All series already imported, no search needed", nil)
+		return nil
+	}
+	imports = toSearch
+
 	// Get available sources
 	sources, err := w.Deps.Suwayomi.GetSources(ctx)
 	if err != nil {
