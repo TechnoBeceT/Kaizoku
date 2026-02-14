@@ -22,7 +22,7 @@ RUN bun run generate
 FROM eclipse-temurin:21-jre-noble
 
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends tini && \
+    apt-get install -y --no-install-recommends tini gosu && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -34,11 +34,14 @@ COPY --from=builder /kaizoku /app/kaizoku
 # Copy frontend static build (Nuxt generates to .output/public/)
 COPY --from=frontend /build/.output/public/ /app/frontend/
 
+# Copy entrypoint script for PUID/PGID support
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 ENV KAIZOKU_DOCKER=true
 ENV KAIZOKU_STORAGE_DIR=/series
 
 EXPOSE 9833
 EXPOSE 4567
 
-ENTRYPOINT ["tini", "--"]
-CMD ["/app/kaizoku"]
+ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]

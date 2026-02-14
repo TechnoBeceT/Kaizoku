@@ -18,6 +18,12 @@ const (
 	ErrCatParse       = "parse"
 	ErrCatCancelled   = "cancelled"
 	ErrCatUnknown     = "unknown"
+
+	// Download-specific categories
+	ErrCatCaptcha      = "captcha"       // Cloudflare challenge, CAPTCHA, WAF block
+	ErrCatPartialDL    = "partial_download" // Pages failed mid-download
+	ErrCatInvalidImage = "invalid_image" // Non-image data received (broken page)
+	ErrCatNoPages      = "no_pages"      // Zero pages could be downloaded
 )
 
 // CategorizeError inspects an error and returns a category string for reporting.
@@ -39,7 +45,26 @@ func CategorizeError(err error) string {
 		return ErrCatNotFound
 	}
 
-	msg := err.Error()
+	msg := strings.ToLower(err.Error())
+
+	// Captcha / Cloudflare / WAF detection (check early, before generic HTTP patterns)
+	if strings.Contains(msg, "cloudflare") || strings.Contains(msg, "challenge") ||
+		strings.Contains(msg, "captcha") || strings.Contains(msg, "cf-ray") ||
+		strings.Contains(msg, "just a moment") || strings.Contains(msg, "403") ||
+		strings.Contains(msg, "access denied") || strings.Contains(msg, "blocked") {
+		return ErrCatCaptcha
+	}
+
+	// Download-specific patterns
+	if strings.Contains(msg, "page") && strings.Contains(msg, "not a valid image") {
+		return ErrCatInvalidImage
+	}
+	if strings.Contains(msg, "no pages downloaded") {
+		return ErrCatNoPages
+	}
+	if strings.Contains(msg, "page") && strings.Contains(msg, "fetch failed") {
+		return ErrCatPartialDL
+	}
 
 	// HTTP status patterns
 	if strings.Contains(msg, "429") || strings.Contains(msg, "rate limit") || strings.Contains(msg, "too many requests") {

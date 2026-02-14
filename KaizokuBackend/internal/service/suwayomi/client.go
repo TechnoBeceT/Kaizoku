@@ -17,6 +17,21 @@ import (
 // ErrNotFound is returned when a Suwayomi resource returns HTTP 404.
 var ErrNotFound = errors.New("not found")
 
+type ctxKey string
+
+const noRetryKey ctxKey = "noRetry"
+
+// WithNoRetry returns a context that disables 5xx/connection retry in doRequest.
+// Use this for non-critical operations like search where fast failure is preferred.
+func WithNoRetry(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noRetryKey, true)
+}
+
+func shouldRetry(ctx context.Context) bool {
+	v, _ := ctx.Value(noRetryKey).(bool)
+	return !v
+}
+
 // Client is an HTTP client for the Suwayomi server API.
 type Client struct {
 	baseURL    string
@@ -80,13 +95,29 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("execute request: %w", err)
+			}
 			lastErr = fmt.Errorf("execute request: %w", err)
 			continue
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("rate limited (429) on %s %s", method, path)
+			}
 			lastErr = fmt.Errorf("rate limited (429) on %s %s", method, path)
+			continue
+		}
+
+		// Retry on server errors (5xx) — transient Suwayomi/source failures
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+			resp.Body.Close()
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("server error (%d) on %s %s", resp.StatusCode, method, path)
+			}
+			lastErr = fmt.Errorf("server error (%d) on %s %s", resp.StatusCode, method, path)
 			continue
 		}
 
@@ -96,7 +127,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	return nil, fmt.Errorf("max retries exceeded: %w", lastErr)
 }
 
-// doRequestURL performs an HTTP request to an absolute URL with retry logic for 429 responses.
+// doRequestURL performs an HTTP request to an absolute URL with retry logic for 429/5xx responses.
 func (c *Client) doRequestURL(ctx context.Context, method, url string, body interface{}) (*http.Response, error) {
 	var bodyReader io.Reader
 	if body != nil {
@@ -138,13 +169,29 @@ func (c *Client) doRequestURL(ctx context.Context, method, url string, body inte
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("execute request: %w", err)
+			}
 			lastErr = fmt.Errorf("execute request: %w", err)
 			continue
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			resp.Body.Close()
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("rate limited (429) on %s %s", method, url)
+			}
 			lastErr = fmt.Errorf("rate limited (429) on %s %s", method, url)
+			continue
+		}
+
+		// Retry on server errors (5xx) — transient Suwayomi/source failures
+		if resp.StatusCode >= 500 && resp.StatusCode < 600 {
+			resp.Body.Close()
+			if !shouldRetry(ctx) {
+				return nil, fmt.Errorf("server error (%d) on %s %s", resp.StatusCode, method, url)
+			}
+			lastErr = fmt.Errorf("server error (%d) on %s %s", resp.StatusCode, method, url)
 			continue
 		}
 

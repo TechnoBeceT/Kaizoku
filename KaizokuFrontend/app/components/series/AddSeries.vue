@@ -116,6 +116,7 @@ function onAugmentedUpdate(updated: AugmentedResponse) {
               v-if="step === 1"
               :label="isAddSourcesMode ? 'Add Sources' : 'Add Series'"
               :loading="isAdding"
+              :disabled="!augmentedData?.series?.length"
               @click="handleAdd"
             />
           </div>

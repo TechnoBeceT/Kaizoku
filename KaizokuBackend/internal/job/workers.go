@@ -91,6 +91,9 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 	pageCountHint := args.PageCount
 	dlSourceID := strconv.Itoa(args.SuwayomiID)
 	dlMeta := map[string]string{"title": args.Title, "chapter": chapStr, "origin": "background_job"}
+	if args.URL != "" {
+		dlMeta["url"] = args.URL
+	}
 
 	chInfo, err := d.Suwayomi.GetChapter(ctx, args.SuwayomiID, args.ChapterIndex)
 	if err != nil {
@@ -130,7 +133,10 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 
 	// Fetch pages using a while-style loop with 404 detection (matching .NET approach).
 	// We do NOT trust pageCount metadata — Suwayomi may report 0 or -1 for unloaded chapters.
+	// If any page fails mid-download, discard everything and return error so the chapter
+	// gets rescheduled (matching .NET's breaked/reschedule behavior).
 	var pages []util.PageData
+	var fetchErr error
 	for i := 0; ; i++ {
 		data, _, err := d.Suwayomi.GetPage(ctx, args.SuwayomiID, args.ChapterIndex, i)
 		if errors.Is(err, suwayomi.ErrNotFound) {
@@ -138,18 +144,21 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 			break
 		}
 		if err != nil {
-			log.Warn().Err(err).Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("failed to fetch page")
+			fetchErr = fmt.Errorf("page %d fetch failed: %w", i, err)
+			log.Warn().Err(err).Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("failed to fetch page, discarding partial download")
 			break
 		}
 
 		if len(data) == 0 {
-			log.Warn().Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("page returned empty data")
+			fetchErr = fmt.Errorf("page %d returned empty data", i)
+			log.Warn().Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("page returned empty data, discarding partial download")
 			break
 		}
 
 		ext := util.DetectImageExtension(data)
 		if ext == ".bin" {
-			log.Warn().Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("page is not a valid image")
+			fetchErr = fmt.Errorf("page %d is not a valid image", i)
+			log.Warn().Int("page", i).Str("title", args.Title).Str("chapter", chapStr).Msg("page is not a valid image, discarding partial download")
 			break
 		}
 
@@ -168,6 +177,15 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 		d.Progress.BroadcastProgress(jobID, int(types.JobTypeDownload),
 			int(types.ProgressStatusRunning), pct,
 			fmt.Sprintf("Downloading %s Ch.%s (%d/%d)", args.Title, chapStr, i+1, pageCountHint), cardInfo)
+	}
+
+	// If a page failed mid-download, discard everything and return error for reschedule
+	if fetchErr != nil {
+		dlMeta["pagesBeforeFailure"] = strconv.Itoa(len(pages))
+		util.LogSourceEvent(d.DB, dlSourceID, args.ProviderName, args.Language,
+			"download", "failed", time.Since(dlStart).Milliseconds(),
+			util.WithError(fetchErr), util.WithMetadata(dlMeta))
+		return "", fetchErr
 	}
 
 	if len(pages) == 0 {
@@ -776,15 +794,19 @@ func (w *GetChaptersWorker) Work(ctx context.Context, job *river.Job[GetChapters
 	chStart := time.Now()
 	onlineChapters, err := w.Deps.Suwayomi.GetChapters(ctx, sp.SuwayomiID, true)
 	chDuration := time.Since(chStart).Milliseconds()
+	chMeta := map[string]string{"origin": "background_job"}
+	if sp.URL != nil && *sp.URL != "" {
+		chMeta["url"] = *sp.URL
+	}
 	if err != nil {
 		util.LogSourceEvent(w.Deps.DB, strconv.Itoa(sp.SuwayomiID), sp.Provider, sp.Language,
 			"get_chapters", "failed", chDuration,
-			util.WithError(err))
+			util.WithError(err), util.WithMetadata(chMeta))
 		return fmt.Errorf("fetch chapters from suwayomi: %w", err)
 	}
 	util.LogSourceEvent(w.Deps.DB, strconv.Itoa(sp.SuwayomiID), sp.Provider, sp.Language,
 		"get_chapters", "success", chDuration,
-		util.WithItemsCount(len(onlineChapters)))
+		util.WithItemsCount(len(onlineChapters)), util.WithMetadata(chMeta))
 
 	// Load series info
 	series, err := w.Deps.DB.Series.Get(ctx, sp.SeriesID)
@@ -2467,6 +2489,11 @@ func (w *ImportSeriesWorker) matchOnDiskFiles(ctx context.Context, seriesID uuid
 				ch.DownloadDate = &now
 				ch.ShouldDownload = false
 				ch.IsDeleted = false
+				// Store actual page count from the archive for later truncation verification
+				localPages := util.CountCBZPages(archivePath)
+				if localPages > 0 {
+					ch.PageCount = &localPages
+				}
 				file.matched = true
 				return true
 			}
@@ -2987,6 +3014,33 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 				result.MissingFiles++
 				result.FixedCount++
 				changed = true
+			} else if ch.PageCount != nil && *ch.PageCount > 0 {
+				// Archive is structurally valid — check page count for truncated files.
+				// Compare actual images in CBZ against the stored page count from the source.
+				localPages := util.CountCBZPages(archivePath)
+				expected := *ch.PageCount
+				if localPages > 0 && float64(localPages) < float64(expected)*0.8 {
+					log.Warn().
+						Str("file", ch.Filename).
+						Int("localPages", localPages).
+						Int("expectedPages", expected).
+						Msg("verify: truncated CBZ detected, flagging for re-download")
+					result.BadFiles = append(result.BadFiles, types.ArchiveIntegrityResult{
+						Filename: ch.Filename,
+						Result:   types.ArchiveResultTruncated,
+					})
+					if err := os.Remove(archivePath); err != nil && !os.IsNotExist(err) {
+						log.Warn().Err(err).Str("file", archivePath).Msg("verify: failed to delete truncated archive")
+					}
+					delete(trackedFiles, ch.Filename)
+					ch.Filename = ""
+					ch.DownloadDate = nil
+					ch.IsDeleted = false
+					ch.ShouldDownload = true
+					result.MissingFiles++
+					result.FixedCount++
+					changed = true
+				}
 			}
 		}
 

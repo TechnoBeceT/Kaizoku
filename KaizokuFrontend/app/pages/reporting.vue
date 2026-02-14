@@ -251,6 +251,62 @@ function diagnoseError(evt: SourceEventDTO): Diagnosis | null {
     }
   }
 
+  // Captcha / Cloudflare / WAF
+  if (cat === 'captcha') {
+    return {
+      title: 'Blocked by Captcha / Cloudflare',
+      explanation: 'The source is protected by Cloudflare, a CAPTCHA, or a Web Application Firewall. The request was blocked before reaching the actual content.',
+      suggestions: [
+        'Enable FlareSolverr in Settings to bypass Cloudflare challenges',
+        'If FlareSolverr is already enabled, verify it\'s running and reachable',
+        'The source may have increased its protection level temporarily',
+        'Try reducing simultaneous downloads to avoid triggering anti-bot detection',
+      ],
+    }
+  }
+
+  // Partial download (pages failed mid-download)
+  if (cat === 'partial_download') {
+    const pagesStr = evt.metadata?.pagesBeforeFailure
+    return {
+      title: 'Partial Download Failed',
+      explanation: `Some pages were downloaded successfully${pagesStr ? ` (${pagesStr} pages)` : ''} but a subsequent page failed. The partial data was discarded and the chapter will be retried.`,
+      suggestions: [
+        'This is usually a transient source issue — the retry should succeed',
+        'If this happens repeatedly for the same chapter, the source may have broken pages',
+        'Check if the source website loads the chapter correctly in a browser',
+      ],
+    }
+  }
+
+  // Invalid image (non-image data received)
+  if (cat === 'invalid_image') {
+    return {
+      title: 'Invalid Image Data',
+      explanation: 'The source returned data that is not a valid image. This often means the source is returning an error page, Cloudflare challenge page, or corrupted data instead of the actual page image.',
+      suggestions: [
+        'This may indicate Cloudflare protection — try enabling FlareSolverr',
+        'The source may be serving error pages instead of images',
+        'Check if the source website shows images correctly in a browser',
+        'The extension may need an update to handle the source\'s new response format',
+      ],
+    }
+  }
+
+  // No pages downloaded
+  if (cat === 'no_pages') {
+    return {
+      title: 'No Pages Available',
+      explanation: 'Zero pages could be downloaded for this chapter. The chapter may not exist on the source, or Suwayomi failed to load the page list.',
+      suggestions: [
+        'Check if the chapter is available on the source website',
+        'The chapter may have been removed by the source',
+        'Try updating the extension — the page URL format may have changed',
+        'Suwayomi may need to be restarted to clear its cache',
+      ],
+    }
+  }
+
   // Unknown / fallback
   return {
     title: 'Unknown Error',
@@ -783,6 +839,20 @@ function diagnoseError(evt: SourceEventDTO): Diagnosis | null {
             </div>
           </div>
 
+          <!-- Source URL -->
+          <div v-if="selectedEvent.metadata?.url">
+            <div class="text-xs font-medium text-muted mb-1">Source URL</div>
+            <a
+              :href="selectedEvent.metadata.url"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center gap-1.5 text-sm text-primary hover:underline break-all"
+            >
+              <UIcon name="i-lucide-external-link" class="size-3.5 shrink-0" />
+              {{ selectedEvent.metadata.url }}
+            </a>
+          </div>
+
           <!-- Error Message -->
           <div v-if="selectedEvent.errorMessage">
             <div class="text-xs font-medium text-muted mb-1">Error Message</div>
@@ -792,11 +862,11 @@ function diagnoseError(evt: SourceEventDTO): Diagnosis | null {
           </div>
 
           <!-- Metadata -->
-          <div v-if="selectedEvent.metadata && Object.keys(selectedEvent.metadata).filter(k => k !== 'origin').length > 0">
+          <div v-if="selectedEvent.metadata && Object.keys(selectedEvent.metadata).filter(k => !['origin', 'url'].includes(k)).length > 0">
             <div class="text-xs font-medium text-muted mb-1">Context</div>
             <div class="rounded-lg bg-muted/10 p-3 text-xs font-mono">
               <div v-for="(val, key) in selectedEvent.metadata" :key="key">
-                <template v-if="key !== 'origin'">
+                <template v-if="!['origin', 'url'].includes(key as string)">
                   <span class="text-muted">{{ key }}:</span> {{ val }}
                 </template>
               </div>

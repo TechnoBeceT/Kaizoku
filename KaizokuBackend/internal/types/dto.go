@@ -215,6 +215,7 @@ type ProviderExtendedInfo struct {
 	IsDisabled           bool              `json:"isDisabled"`
 	IsUninstalled        bool              `json:"isUninstalled"`
 	IsDeleted            bool              `json:"isDeleted"`
+	DeleteFiles          bool              `json:"deleteFiles"`
 	LastUpdatedUTC       string            `json:"lastUpdatedUTC"`
 	Status               SeriesStatus      `json:"status"`
 	LastChapter          *float64          `json:"lastChapter"`
@@ -346,6 +347,7 @@ const (
 	ArchiveResultNotAnArchive ArchiveResult = "NotAnArchive"
 	ArchiveResultNoImages     ArchiveResult = "NoImages"
 	ArchiveResultNotFound     ArchiveResult = "NotFound"
+	ArchiveResultTruncated    ArchiveResult = "Truncated"
 )
 
 // DeepVerifyResult is the result of a deep content verification.

@@ -5,12 +5,33 @@ import { getApiConfig } from '~/utils/api-config'
 const keyword = ref('')
 const debouncedKeyword = useDebounce(keyword, 500)
 const selectedIds = ref<string[]>([])
+const selectedSourceIds = ref<string[]>([])
+
+const { data: sources } = useSearchSources()
+
+const sortedSources = computed(() => {
+  if (!sources.value) return []
+  return [...sources.value].sort((a, b) => a.sourceName.localeCompare(b.sourceName))
+})
+
+const sourceItems = computed(() =>
+  sortedSources.value.map(s => ({
+    label: `${s.sourceName} (${s.language.toUpperCase()})`,
+    value: s.sourceId,
+  }))
+)
 
 const searchParams = computed(() => ({
   keyword: debouncedKeyword.value,
+  ...(selectedSourceIds.value.length > 0 && { searchSources: selectedSourceIds.value }),
 }))
 
 const { data: results, isLoading } = useSearchSeries(searchParams, computed(() => debouncedKeyword.value.length >= 3))
+
+// Reset selections when search results change
+watch(results, () => {
+  selectedIds.value = []
+})
 
 function formatThumbnailUrl(url?: string): string {
   if (!url) return '/kaizoku.net.png'
@@ -49,6 +70,15 @@ function getSelectedSeries(): LinkedSeries[] {
   return results.value.filter((s: LinkedSeries) => selectedIds.value.includes(s.id))
 }
 
+function removeSource(sourceId: string) {
+  selectedSourceIds.value = selectedSourceIds.value.filter(id => id !== sourceId)
+}
+
+function getSourceLabel(sourceId: string): string {
+  const src = sources.value?.find(s => s.sourceId === sourceId)
+  return src ? `${src.sourceName} (${src.language.toUpperCase()})` : sourceId
+}
+
 const hasSelection = computed(() => selectedIds.value.length > 0)
 
 defineExpose({ getSelectedSeries, hasSelection })
@@ -56,12 +86,38 @@ defineExpose({ getSelectedSeries, hasSelection })
 
 <template>
   <div class="space-y-4">
-    <UInput
-      v-model="keyword"
-      type="search"
-      placeholder="Search for a series..."
-      icon="i-lucide-search"
-    />
+    <div class="flex gap-2">
+      <UInput
+        v-model="keyword"
+        type="search"
+        placeholder="Search for a series..."
+        icon="i-lucide-search"
+        class="flex-1"
+      />
+      <USelectMenu
+        v-model="selectedSourceIds"
+        :items="sourceItems"
+        multiple
+        value-key="value"
+        placeholder="All sources"
+        class="w-52"
+        :search-input="false"
+      />
+    </div>
+
+    <!-- Selected source chips -->
+    <div v-if="selectedSourceIds.length > 0" class="flex flex-wrap items-center gap-2">
+      <UBadge
+        v-for="srcId in selectedSourceIds"
+        :key="srcId"
+        variant="subtle"
+        class="cursor-pointer"
+        @click="removeSource(srcId)"
+      >
+        {{ getSourceLabel(srcId) }}
+        <UIcon name="i-lucide-x" class="size-3 ml-1" />
+      </UBadge>
+    </div>
 
     <div v-if="isLoading" class="text-center text-muted py-12">
       <UIcon name="i-lucide-loader-circle" class="size-8 animate-spin mx-auto mb-3 opacity-50" />
@@ -104,7 +160,7 @@ defineExpose({ getSelectedSeries, hasSelection })
     <div v-else-if="debouncedKeyword.length >= 3" class="text-center text-muted py-12">
       <UIcon name="i-lucide-search-x" class="size-10 mx-auto mb-3 opacity-50" />
       <p>No results found for "{{ debouncedKeyword }}"</p>
-      <p class="text-xs mt-1">Try a different search term</p>
+      <p class="text-xs mt-1">Try a different search term or change source filter</p>
     </div>
 
     <div v-else class="text-center text-muted py-12">

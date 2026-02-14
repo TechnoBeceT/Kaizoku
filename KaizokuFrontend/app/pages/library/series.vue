@@ -20,6 +20,9 @@ const cleanupMutation = useCleanupSeries()
 
 const showDeleteDialog = ref(false)
 const deletePhysical = ref(false)
+const showDeleteProviderDialog = ref(false)
+const deleteProviderPhysical = ref(false)
+const providerToDelete = ref<ProviderExtendedInfo | null>(null)
 const matchingProviderId = ref<string | null>(null)
 const toast = useToast()
 
@@ -187,17 +190,32 @@ async function toggleDisabled(provider: ProviderExtendedInfo) {
   await updateMutation.mutateAsync(updated as SeriesExtendedInfo)
 }
 
-async function deleteProvider(provider: ProviderExtendedInfo) {
-  if (!series.value) return
-  const updatedProviders = localProviders.value.map((p) => {
-    if (p.id === provider.id) {
-      return { ...p, isDeleted: true, isDisabled: true }
-    }
-    return p
-  })
-  localProviders.value = updatedProviders.filter(p => !p.isDeleted)
-  const updated = { ...series.value, providers: updatedProviders }
-  await updateMutation.mutateAsync(updated as SeriesExtendedInfo)
+function confirmDeleteProvider(provider: ProviderExtendedInfo) {
+  providerToDelete.value = provider
+  deleteProviderPhysical.value = false
+  showDeleteProviderDialog.value = true
+}
+
+async function handleDeleteProvider() {
+  if (!series.value || !providerToDelete.value) return
+  const provider = providerToDelete.value
+  const deleteFiles = deleteProviderPhysical.value
+  try {
+    const updatedProviders = localProviders.value.map((p) => {
+      if (p.id === provider.id) {
+        return { ...p, isDeleted: true, isDisabled: true, deleteFiles }
+      }
+      return p
+    })
+    localProviders.value = updatedProviders.filter(p => !p.isDeleted)
+    const updated = { ...series.value, providers: updatedProviders }
+    await updateMutation.mutateAsync(updated as SeriesExtendedInfo)
+    toast.add({ title: 'Source deleted', color: 'success' })
+  } catch {
+    toast.add({ title: 'Failed to delete source', color: 'error' })
+  }
+  showDeleteProviderDialog.value = false
+  providerToDelete.value = null
 }
 
 function formatDate(dateStr?: string): string {
@@ -420,7 +438,7 @@ function formatDate(dateStr?: string): string {
                           label="Delete"
                           color="error"
                           size="xs"
-                          @click="deleteProvider(provider)"
+                          @click="confirmDeleteProvider(provider)"
                         />
                         <UButton
                           v-if="!provider.isUnknown && !provider.isUninstalled"
@@ -533,6 +551,25 @@ function formatDate(dateStr?: string): string {
           <div class="flex justify-end gap-2">
             <UButton variant="ghost" label="Cancel" @click="showDeleteDialog = false" />
             <UButton color="error" label="Delete" :loading="deleteMutation.isPending.value" @click="handleDelete" />
+          </div>
+        </div>
+      </template>
+    </UModal>
+
+    <!-- Delete Provider Dialog -->
+    <UModal v-model:open="showDeleteProviderDialog">
+      <template #body>
+        <div class="space-y-4 p-4">
+          <h3 class="text-lg font-semibold">Delete Source</h3>
+          <p class="text-sm text-muted">
+            Are you sure you want to delete "{{ providerToDelete?.provider }}" ({{ providerToDelete?.lang }})?
+          </p>
+          <div class="flex items-center gap-2">
+            <UCheckbox v-model="deleteProviderPhysical" label="Also delete downloaded chapter files" />
+          </div>
+          <div class="flex justify-end gap-2">
+            <UButton variant="ghost" label="Cancel" @click="showDeleteProviderDialog = false" />
+            <UButton color="error" label="Delete" :loading="updateMutation.isPending.value" @click="handleDeleteProvider" />
           </div>
         </div>
       </template>

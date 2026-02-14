@@ -18,9 +18,12 @@ const seriesList = ref<FullSeries[]>([...props.augmented.series])
 // Capture the ORIGINAL base path once — never changes, prevents path duplication
 const basePath = props.augmented.storageFolderPath || ''
 
-// Set initial importance based on array order
+// Set initial importance and selection state
 seriesList.value.forEach((s, i) => {
   s.importance = i
+  if (s.isSelected === undefined || s.isSelected === null) {
+    s.isSelected = true
+  }
 })
 
 // Ensure at least one has useCover and useTitle
@@ -31,7 +34,9 @@ if (!seriesList.value.some(s => s.useTitle)) {
   seriesList.value[0].useTitle = true
 }
 
-const titleSource = computed(() => seriesList.value.find(s => s.useTitle))
+const selectedCount = computed(() => seriesList.value.filter(s => s.isSelected).length)
+
+const titleSource = computed(() => seriesList.value.find(s => s.useTitle && s.isSelected))
 
 const storagePath = computed(() => {
   const title = titleSource.value?.suggestedFilename || titleSource.value?.title || 'Unknown'
@@ -53,6 +58,24 @@ function onImgError(e: Event) {
   if (!img.src.endsWith('/kaizoku.net.png')) {
     img.src = '/kaizoku.net.png'
   }
+}
+
+function toggleSelection(index: number) {
+  seriesList.value[index].isSelected = !seriesList.value[index].isSelected
+  // If the deselected source had useCover or useTitle, reassign to first selected
+  const s = seriesList.value[index]
+  if (!s.isSelected) {
+    const firstSelected = seriesList.value.find(x => x.isSelected)
+    if (s.useCover && firstSelected) {
+      s.useCover = false
+      firstSelected.useCover = true
+    }
+    if (s.useTitle && firstSelected) {
+      s.useTitle = false
+      firstSelected.useTitle = true
+    }
+  }
+  emitUpdate()
 }
 
 function setCoverSource(id: string) {
@@ -87,7 +110,7 @@ function onDragEnd() {
 function emitUpdate() {
   const updated: AugmentedResponse = {
     ...props.augmented,
-    series: seriesList.value,
+    series: seriesList.value.filter(s => s.isSelected),
     storageFolderPath: storagePath.value,
   }
   emit('update:augmented', updated)
@@ -115,7 +138,10 @@ emitUpdate()
 
     <!-- Source Importance List -->
     <div class="space-y-2">
-      <label class="text-sm font-medium">Source Priority (drag to reorder)</label>
+      <div class="flex items-center gap-2">
+        <label class="text-sm font-medium">Source Priority (drag to reorder)</label>
+        <UBadge variant="subtle" size="xs">{{ selectedCount }}/{{ seriesList.length }} selected</UBadge>
+      </div>
       <draggable
         v-model="seriesList"
         item-key="id"
@@ -124,7 +150,22 @@ emitUpdate()
         @end="onDragEnd"
       >
         <template #item="{ element, index }">
-          <div class="flex items-center gap-3 p-3 mb-2 rounded-lg border border-default bg-default hover:border-primary/50 transition-colors">
+          <div
+            class="flex items-center gap-3 p-3 mb-2 rounded-lg border transition-colors"
+            :class="element.isSelected
+              ? 'border-primary/50 bg-default hover:border-primary/70'
+              : 'border-default bg-default opacity-50'"
+          >
+            <!-- Selection Checkbox -->
+            <label class="shrink-0 cursor-pointer" @click.stop>
+              <input
+                type="checkbox"
+                :checked="element.isSelected"
+                class="accent-primary size-4"
+                @change="toggleSelection(index)"
+              />
+            </label>
+
             <!-- Drag Handle -->
             <div class="drag-handle cursor-grab active:cursor-grabbing text-muted hover:text-default">
               <UIcon name="i-lucide-grip-vertical" class="size-5" />
@@ -163,7 +204,7 @@ emitUpdate()
             </div>
 
             <!-- Cover / Title Radio -->
-            <div class="flex flex-col gap-2 shrink-0">
+            <div v-if="element.isSelected" class="flex flex-col gap-2 shrink-0">
               <label class="flex items-center gap-1.5 text-xs cursor-pointer" @click.stop>
                 <input
                   type="radio"

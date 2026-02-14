@@ -372,6 +372,7 @@ export interface ProviderExtendedInfo {
   isDisabled: boolean
   isUninstalled: boolean
   isDeleted: boolean
+  deleteFiles: boolean
   lastUpdatedUTC: string
   status: SeriesStatus
   lastChapter?: number
@@ -489,6 +490,7 @@ export enum ArchiveResult {
   NotAnArchive = 'NotAnArchive',
   NoImages = 'NoImages',
   NotFound = 'NotFound',
+  Truncated = 'Truncated',
 }
 
 export enum ErrorDownloadAction {

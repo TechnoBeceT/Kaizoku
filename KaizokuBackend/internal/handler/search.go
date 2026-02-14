@@ -73,8 +73,11 @@ func (h *SearchHandler) SearchSeries(c echo.Context) error {
 	}
 	h.cacheMu.RUnlock()
 
+	// No-retry context: search should fail fast, retries are only for downloads
+	noRetryCtx := suwayomi.WithNoRetry(ctx)
+
 	// Get sources filtered by language
-	allSources, err := h.suwayomi.GetSources(ctx)
+	allSources, err := h.suwayomi.GetSources(noRetryCtx)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -129,7 +132,7 @@ func (h *SearchHandler) SearchSeries(c echo.Context) error {
 			defer func() { <-sem }()
 
 			srcStart := time.Now()
-			res, err := h.suwayomi.SearchSeries(ctx, source.ID, keyword, 1)
+			res, err := h.suwayomi.SearchSeries(noRetryCtx, source.ID, keyword, 1)
 			srcDuration := time.Since(srcStart).Milliseconds()
 			if err != nil {
 				log.Warn().Err(err).Str("source", source.Name).Msg("search error")
@@ -225,7 +228,7 @@ func (h *SearchHandler) SearchSeries(c echo.Context) error {
 func (h *SearchHandler) GetSearchSources(c echo.Context) error {
 	ctx := c.Request().Context()
 
-	sources, err := h.suwayomi.GetSources(ctx)
+	sources, err := h.suwayomi.GetSources(suwayomi.WithNoRetry(ctx))
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
@@ -278,7 +281,7 @@ func (h *SearchHandler) AugmentSeries(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "no series provided"})
 	}
 
-	ctx := c.Request().Context()
+	ctx := suwayomi.WithNoRetry(c.Request().Context())
 
 	// Parallel fetch full data for each series
 	type augResult struct {

@@ -92,7 +92,7 @@ func (h *SeriesHandler) GetSeries(c echo.Context) error {
 	}
 
 	// Eager load providers
-	providers, err := s.QueryProviders().All(ctx)
+	providers, err := s.QueryProviders().Order(seriesprovider.ByImportance()).All(ctx)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to load providers")
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Error getting series."})
@@ -529,7 +529,7 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 		}
 	}
 
-	// 2. Check ComicInfo.xml in each CBZ against expected metadata
+	// 2. Check each CBZ: page count truncation + ComicInfo.xml metadata
 	for _, p := range providers {
 		for _, ch := range p.Chapters {
 			if ch.Filename == "" || ch.IsDeleted {
@@ -537,6 +537,28 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 			}
 
 			archivePath := filepath.Join(seriesDir, ch.Filename)
+			chapNum := ""
+			if ch.Number != nil {
+				chapNum = util.FormatChapterNumber(*ch.Number)
+			}
+
+			// 2a. Page count truncation check
+			if ch.PageCount != nil && *ch.PageCount > 0 {
+				localPages := util.CountCBZPages(archivePath)
+				expected := *ch.PageCount
+				if localPages > 0 && float64(localPages) < float64(expected)*0.8 {
+					result.SuspiciousFiles = append(result.SuspiciousFiles, types.SuspiciousFile{
+						Filename:      ch.Filename,
+						Provider:      p.Provider,
+						ExpectedTitle: p.Title,
+						ActualTitle:   fmt.Sprintf("%d pages (expected %d)", localPages, expected),
+						ChapterNumber: chapNum,
+						Reason:        "truncated",
+					})
+				}
+			}
+
+			// 2b. ComicInfo.xml content validation
 			ci, err := util.ReadComicInfoFromCBZ(archivePath)
 			if err != nil {
 				log.Debug().Err(err).Str("file", ch.Filename).Msg("deep-verify: failed to read ComicInfo.xml")
@@ -565,11 +587,6 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 				if areTitlesSimilar(ci.LocalizedSeries, p.Title) || areTitlesSimilar(ci.LocalizedSeries, s.Title) {
 					titleMatch = true
 				}
-			}
-
-			chapNum := ""
-			if ch.Number != nil {
-				chapNum = util.FormatChapterNumber(*ch.Number)
 			}
 
 			if !titleMatch {
@@ -1434,15 +1451,26 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 			// Track deleted provider for download cancellation
 			deletedProviderIDs = append(deletedProviderIDs, existing.ID)
 
-			// Handle provider deletion
-			if existing.IsUnknown && allChaptersEmpty(existing.Chapters) {
-				// Delete empty unknown provider
-				if err := h.db.SeriesProvider.DeleteOneID(existing.ID).Exec(ctx); err != nil {
-					log.Warn().Err(err).Msg("failed to delete provider")
+			// Delete physical chapter files if requested
+			if p.DeleteFiles && hasDownloadedChapters(existing.Chapters) {
+				settings, _ := h.settings.Get(ctx)
+				if settings != nil && dbSeries.StoragePath != "" {
+					seriesDir := filepath.Join(settings.StorageFolder, dbSeries.StoragePath)
+					for _, ch := range existing.Chapters {
+						if ch.Filename == "" {
+							continue
+						}
+						fullPath := filepath.Join(seriesDir, ch.Filename)
+						if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
+							log.Warn().Err(err).Str("file", fullPath).Msg("failed to delete chapter file")
+						}
+					}
 				}
-				deletedSuwayomiIDs = append(deletedSuwayomiIDs, existing.SuwayomiID)
-			} else if hasDownloadedChapters(existing.Chapters) {
-				// Convert to unknown provider
+			}
+
+			// Delete provider from DB (always fully delete when user explicitly deletes)
+			if !p.DeleteFiles && hasDownloadedChapters(existing.Chapters) {
+				// Keep files: convert to unknown provider so files stay tracked
 				if err := h.db.SeriesProvider.UpdateOneID(existing.ID).
 					SetSuwayomiID(0).
 					SetProvider("Unknown").
@@ -1458,7 +1486,7 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 					log.Warn().Err(err).Msg("failed to convert provider to unknown")
 				}
 			} else {
-				// Just delete
+				// Fully delete: no downloaded files, or files are being deleted
 				if err := h.db.SeriesProvider.DeleteOneID(existing.ID).Exec(ctx); err != nil {
 					log.Warn().Err(err).Msg("failed to delete provider")
 				}
@@ -1561,6 +1589,7 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 	dbSeries, _ = h.db.Series.Get(ctx, uid)
 	remainingProviders, _ = h.db.SeriesProvider.Query().
 		Where(seriesprovider.SeriesIDEQ(uid)).
+		Order(seriesprovider.ByImportance()).
 		All(ctx)
 
 	settings, _ := h.settings.Get(ctx)
@@ -1627,26 +1656,10 @@ func (h *SeriesHandler) DeleteSeries(c echo.Context) error {
 		settings, _ := h.settings.Get(ctx)
 		if settings != nil && dbSeries.StoragePath != "" {
 			seriesDir := filepath.Join(settings.StorageFolder, dbSeries.StoragePath)
-
-			// Delete individual chapter files
-			for _, p := range providers {
-				for _, ch := range p.Chapters {
-					if ch.Filename == "" {
-						continue
-					}
-					fullPath := filepath.Join(seriesDir, ch.Filename)
-					if err := os.Remove(fullPath); err != nil && !os.IsNotExist(err) {
-						log.Warn().Err(err).Str("file", fullPath).Msg("failed to delete chapter file")
-					}
-				}
-			}
-
-			// Remove directory if empty
-			entries, err := os.ReadDir(seriesDir)
-			if err == nil && len(entries) == 0 {
-				if err := os.Remove(seriesDir); err != nil {
-					log.Warn().Err(err).Str("dir", seriesDir).Msg("failed to remove empty series directory")
-				}
+			if err := os.RemoveAll(seriesDir); err != nil {
+				log.Warn().Err(err).Str("dir", seriesDir).Msg("failed to delete series directory")
+			} else {
+				log.Info().Str("dir", seriesDir).Msg("deleted series directory")
 			}
 		}
 	}

@@ -5,6 +5,8 @@ services:
     ports:
       - "9833:9833"
     environment:
+      PUID: "1000"
+      PGID: "1000"
       KAIZOKU_DOCKER: "true"
       KAIZOKU_DATABASE_HOST: postgres
       KAIZOKU_DATABASE_PORT: "5432"
