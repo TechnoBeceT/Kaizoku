@@ -22,6 +22,7 @@ import (
 	"github.com/technobecet/kaizoku-go/internal/ent"
 	"github.com/technobecet/kaizoku-go/internal/ent/importentry"
 	"github.com/technobecet/kaizoku-go/internal/ent/latestseries"
+	"github.com/technobecet/kaizoku-go/internal/ent/series"
 	"github.com/technobecet/kaizoku-go/internal/ent/seriesprovider"
 	"github.com/technobecet/kaizoku-go/internal/ent/sourceevent"
 	"github.com/technobecet/kaizoku-go/internal/service/suwayomi"
@@ -2402,26 +2403,71 @@ func (w *ImportSeriesWorker) createSeriesFromImport(
 
 	storagePath := imp.ID // Path is the ID for ImportEntry
 
-	dbSeries, err := w.Deps.DB.Series.Create().
-		SetTitle(consolidated.Title).
-		SetDescription(consolidated.Description).
-		SetThumbnailURL(derefStrDefault(consolidated.ThumbnailURL, "")).
-		SetArtist(consolidated.Artist).
-		SetAuthor(consolidated.Author).
-		SetGenre(consolidated.Genre).
-		SetStatus(string(consolidated.Status)).
-		SetStoragePath(storagePath).
-		SetNillableType(consolidated.Type).
-		SetChapterCount(consolidated.ChapterCount).
-		SetPauseDownloads(disableDownloads).
-		Save(ctx)
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("create series: %w", err)
+	// Check if a series with this storage path already exists (prevent duplicates)
+	existing, _ := w.Deps.DB.Series.Query().
+		Where(series.StoragePathEqualFold(storagePath)).
+		First(ctx)
+
+	var dbSeries *ent.Series
+	var err error
+	if existing != nil {
+		// Update the existing series metadata instead of creating a duplicate
+		log.Info().Str("title", existing.Title).Str("storagePath", storagePath).
+			Msg("series already exists, adding providers to existing record")
+		dbSeries, err = w.Deps.DB.Series.UpdateOneID(existing.ID).
+			SetTitle(consolidated.Title).
+			SetDescription(consolidated.Description).
+			SetThumbnailURL(derefStrDefault(consolidated.ThumbnailURL, "")).
+			SetArtist(consolidated.Artist).
+			SetAuthor(consolidated.Author).
+			SetGenre(consolidated.Genre).
+			SetStatus(string(consolidated.Status)).
+			SetNillableType(consolidated.Type).
+			SetChapterCount(max(existing.ChapterCount, consolidated.ChapterCount)).
+			Save(ctx)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("update existing series: %w", err)
+		}
+	} else {
+		dbSeries, err = w.Deps.DB.Series.Create().
+			SetTitle(consolidated.Title).
+			SetDescription(consolidated.Description).
+			SetThumbnailURL(derefStrDefault(consolidated.ThumbnailURL, "")).
+			SetArtist(consolidated.Artist).
+			SetAuthor(consolidated.Author).
+			SetGenre(consolidated.Genre).
+			SetStatus(string(consolidated.Status)).
+			SetStoragePath(storagePath).
+			SetNillableType(consolidated.Type).
+			SetChapterCount(consolidated.ChapterCount).
+			SetPauseDownloads(disableDownloads).
+			Save(ctx)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("create series: %w", err)
+		}
+	}
+
+	// Build a map of existing providers to avoid creating duplicates
+	existingProviders, _ := w.Deps.DB.SeriesProvider.Query().
+		Where(seriesprovider.SeriesIDEQ(dbSeries.ID)).
+		All(ctx)
+	existingProviderMap := make(map[string]bool)
+	for _, ep := range existingProviders {
+		key := strings.ToLower(ep.Provider + "|" + ep.Language + "|" + ep.Scanlator)
+		existingProviderMap[key] = true
 	}
 
 	// Create providers
 	var createdProviderIDs []uuid.UUID
 	for _, fs := range selected {
+		// Skip providers that already exist on this series
+		provKey := strings.ToLower(fs.Provider + "|" + fs.Lang + "|" + fs.Scanlator)
+		if existingProviderMap[provKey] {
+			log.Info().Str("provider", fs.Provider).Str("lang", fs.Lang).
+				Msg("provider already exists on series, skipping")
+			continue
+		}
+
 		suwayomiID, _ := strconv.Atoi(fs.ID)
 
 		create := w.Deps.DB.SeriesProvider.Create().

@@ -24,6 +24,7 @@ import (
 	"github.com/technobecet/kaizoku-go/internal/config"
 	"github.com/technobecet/kaizoku-go/internal/ent"
 	"github.com/technobecet/kaizoku-go/internal/ent/latestseries"
+	entseries "github.com/technobecet/kaizoku-go/internal/ent/series"
 	"github.com/technobecet/kaizoku-go/internal/ent/seriesprovider"
 	"github.com/technobecet/kaizoku-go/internal/job"
 	settingssvc "github.com/technobecet/kaizoku-go/internal/service/settings"
@@ -1225,32 +1226,49 @@ func (h *SeriesHandler) AddSeries(c echo.Context) error {
 	consolidated := consolidateFullSeries(req.Series)
 
 	if dbSeries == nil {
-		// Create new series
+		// Derive relative storage path
 		storagePath := req.StorageFolderPath
 		if storagePath != "" && strings.HasPrefix(storagePath, settings.StorageFolder) {
 			storagePath = strings.TrimPrefix(storagePath, settings.StorageFolder)
 			storagePath = strings.TrimLeft(storagePath, "/\\")
 		}
 
-		dbSeries, err = h.db.Series.Create().
-			SetTitle(consolidated.Title).
-			SetDescription(consolidated.Description).
-			SetThumbnailURL(derefStr(consolidated.ThumbnailURL)).
-			SetArtist(consolidated.Artist).
-			SetAuthor(consolidated.Author).
-			SetGenre(consolidated.Genre).
-			SetStatus(string(consolidated.Status)).
-			SetStoragePath(storagePath).
-			SetNillableType(consolidated.Type).
-			SetChapterCount(consolidated.ChapterCount).
-			SetPauseDownloads(req.DisableJobs).
-			Save(ctx)
-		if err != nil {
-			log.Error().Err(err).Msg("failed to create series")
-			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Error adding full series."})
+		// Check if a series with this storage path already exists (prevent duplicates)
+		if storagePath != "" {
+			existing, _ := h.db.Series.Query().
+				Where(entseries.StoragePathEqualFold(storagePath)).
+				First(ctx)
+			if existing != nil {
+				log.Info().Str("title", existing.Title).Str("storagePath", storagePath).
+					Msg("series already exists at storage path, updating instead of creating duplicate")
+				dbSeries = existing
+			}
 		}
-	} else {
-		// Update existing series
+
+		if dbSeries == nil {
+			// Create new series
+			dbSeries, err = h.db.Series.Create().
+				SetTitle(consolidated.Title).
+				SetDescription(consolidated.Description).
+				SetThumbnailURL(derefStr(consolidated.ThumbnailURL)).
+				SetArtist(consolidated.Artist).
+				SetAuthor(consolidated.Author).
+				SetGenre(consolidated.Genre).
+				SetStatus(string(consolidated.Status)).
+				SetStoragePath(storagePath).
+				SetNillableType(consolidated.Type).
+				SetChapterCount(consolidated.ChapterCount).
+				SetPauseDownloads(req.DisableJobs).
+				Save(ctx)
+			if err != nil {
+				log.Error().Err(err).Msg("failed to create series")
+				return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Error adding full series."})
+			}
+		}
+	}
+
+	if existingSeriesID != nil {
+		// Update existing series metadata (explicit ID provided by caller)
 		dbSeries, err = h.db.Series.UpdateOneID(dbSeries.ID).
 			SetTitle(consolidated.Title).
 			SetDescription(consolidated.Description).
