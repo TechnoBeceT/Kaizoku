@@ -1454,6 +1454,7 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 	deletedSuwayomiIDs := make([]int, 0)
 	var deletedProviderIDs []uuid.UUID
 	var newlyDisabledProviderIDs []uuid.UUID
+	needsChapterRefetch := false // Track if changes require re-fetching chapters
 	for _, p := range req.Providers {
 		pid, err := uuid.Parse(p.ID)
 		if err != nil {
@@ -1468,6 +1469,7 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 		if p.IsDeleted {
 			// Track deleted provider for download cancellation
 			deletedProviderIDs = append(deletedProviderIDs, existing.ID)
+			needsChapterRefetch = true
 
 			// Delete physical chapter files if requested
 			if p.DeleteFiles && hasDownloadedChapters(existing.Chapters) {
@@ -1513,9 +1515,13 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 			continue
 		}
 
-		// Track providers that are being newly disabled
+		// Track providers that are being newly disabled or re-enabled
 		if p.IsDisabled && !existing.IsDisabled {
 			newlyDisabledProviderIDs = append(newlyDisabledProviderIDs, existing.ID)
+			needsChapterRefetch = true
+		}
+		if !p.IsDisabled && existing.IsDisabled {
+			needsChapterRefetch = true
 		}
 
 		// Normal update
@@ -1526,6 +1532,9 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 			SetIsCover(p.UseCover)
 
 		if p.ContinueAfterChapter != nil {
+			if existing.ContinueAfterChapter == nil || *existing.ContinueAfterChapter != *p.ContinueAfterChapter {
+				needsChapterRefetch = true
+			}
 			update = update.SetContinueAfterChapter(*p.ContinueAfterChapter)
 		}
 
@@ -1550,6 +1559,11 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 		} else if cancelled > 0 {
 			log.Info().Int("count", cancelled).Str("providerId", pid.String()).Msg("cancelled downloads for disabled provider")
 		}
+	}
+
+	// Track pause state changes for chapter refetch
+	if req.PausedDownloads != dbSeries.PauseDownloads {
+		needsChapterRefetch = true
 	}
 
 	// Cancel all queued downloads if pause is being toggled on
@@ -1613,13 +1627,16 @@ func (h *SeriesHandler) UpdateSeries(c echo.Context) error {
 	settings, _ := h.settings.Get(ctx)
 	result := h.toSeriesExtendedInfo(c, dbSeries, remainingProviders, settings)
 
-	// Reschedule GetChapters jobs for active providers
-	for _, p := range remainingProviders {
-		if p.IsDisabled || p.IsUnknown {
-			continue
-		}
-		if _, err := h.river.Insert(ctx, job.GetChaptersArgs{ProviderID: p.ID}, nil); err != nil {
-			log.Warn().Err(err).Str("providerId", p.ID.String()).Msg("failed to enqueue GetChapters job")
+	// Reschedule GetChapters jobs only when significant changes occurred
+	// (not for pure reorder/cover/title changes)
+	if needsChapterRefetch {
+		for _, p := range remainingProviders {
+			if p.IsDisabled || p.IsUnknown {
+				continue
+			}
+			if _, err := h.river.Insert(ctx, job.GetChaptersArgs{ProviderID: p.ID}, nil); err != nil {
+				log.Warn().Err(err).Str("providerId", p.ID.String()).Msg("failed to enqueue GetChapters job")
+			}
 		}
 	}
 

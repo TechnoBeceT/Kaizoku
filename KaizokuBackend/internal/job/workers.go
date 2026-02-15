@@ -350,16 +350,17 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 }
 
 // cascadeOnFailure tries the next fallback provider or schedules a full cascade retry.
-func (d *Deps) cascadeOnFailure(ctx context.Context, args types.DownloadChapterArgs) {
+// Returns true if a retry/fallback was enqueued, false if all retries are exhausted.
+func (d *Deps) cascadeOnFailure(ctx context.Context, args types.DownloadChapterArgs) bool {
 	// Try remaining fallback providers
 	if len(args.FallbackProviders) > 0 {
 		if err := d.enqueueNextFallback(ctx, args); err == nil {
-			return // Successfully cascaded
+			return true // Successfully cascaded
 		}
 	}
 
 	// All fallbacks exhausted — schedule full cascade retry
-	d.scheduleFullCascadeRetry(ctx, args)
+	return d.scheduleFullCascadeRetry(ctx, args)
 }
 
 // enqueueNextFallback finds the next usable fallback provider and enqueues a download.
@@ -412,14 +413,18 @@ func (d *Deps) enqueueNextFallback(ctx context.Context, args types.DownloadChapt
 }
 
 // scheduleFullCascadeRetry rebuilds the full provider list and schedules a retry after a delay.
-func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.DownloadChapterArgs) {
+// Returns true if a retry was enqueued, false if max retries exhausted.
+func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.DownloadChapterArgs) bool {
 	maxRetries, retryDelay := d.getRetrySettings(ctx)
 	if args.CascadeRetries >= maxRetries {
 		log.Warn().
 			Str("title", args.Title).
 			Int("retries", args.CascadeRetries).
 			Msg("chapter download permanently failed after all cascade retries")
-		return
+
+		// Mark the chapter as permanently failed so future jobs skip it
+		d.markChapterPermanentlyFailed(ctx, args)
+		return false
 	}
 
 	allProviders, err := d.DB.SeriesProvider.Query().
@@ -431,7 +436,7 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 		All(ctx)
 	if err != nil || len(allProviders) == 0 {
 		log.Warn().Err(err).Msg("no providers available for cascade retry")
-		return
+		return false
 	}
 
 	sort.Slice(allProviders, func(i, j int) bool {
@@ -459,7 +464,7 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 
 	if primary == nil {
 		log.Warn().Str("title", args.Title).Msg("no provider has this chapter for cascade retry")
-		return
+		return false
 	}
 
 	var fallbacks []types.FallbackSource
@@ -496,12 +501,50 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 
 	if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
 		log.Warn().Err(err).Msg("failed to schedule cascade retry")
+		return false
+	}
+
+	log.Info().
+		Str("title", args.Title).
+		Int("retry", args.CascadeRetries+1).
+		Dur("delay", retryDelay).
+		Msg("scheduled cascade retry")
+	return true
+}
+
+// markChapterPermanentlyFailed marks a chapter as permanently failed in the provider's chapter list.
+func (d *Deps) markChapterPermanentlyFailed(ctx context.Context, args types.DownloadChapterArgs) {
+	if args.ChapterNumber == nil {
+		return
+	}
+
+	sp, err := d.DB.SeriesProvider.Get(ctx, args.ProviderID)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to load provider for permanent failure marking")
+		return
+	}
+
+	chapters := make([]types.Chapter, len(sp.Chapters))
+	copy(chapters, sp.Chapters)
+
+	for i, ch := range chapters {
+		if ch.Number != nil && *ch.Number == *args.ChapterNumber {
+			chapters[i].IsPermanentlyFailed = true
+			chapters[i].ShouldDownload = false
+			break
+		}
+	}
+
+	if _, err := d.DB.SeriesProvider.UpdateOneID(sp.ID).
+		SetChapters(chapters).
+		Save(ctx); err != nil {
+		log.Warn().Err(err).Msg("failed to save permanent failure flag")
 	} else {
 		log.Info().
 			Str("title", args.Title).
-			Int("retry", args.CascadeRetries+1).
-			Dur("delay", retryDelay).
-			Msg("scheduled cascade retry")
+			Str("provider", args.ProviderName).
+			Float64("chapter", *args.ChapterNumber).
+			Msg("chapter marked as permanently failed")
 	}
 }
 
@@ -673,7 +716,8 @@ func (d *Deps) handleReplacementSuccess(ctx context.Context, args types.Download
 }
 
 // handleReplacementFailure retries the replacement or tries the next importance level.
-func (d *Deps) handleReplacementFailure(ctx context.Context, args types.DownloadChapterArgs) {
+// Returns true if a retry was enqueued, false if exhausted.
+func (d *Deps) handleReplacementFailure(ctx context.Context, args types.DownloadChapterArgs) bool {
 	maxRetries, retryDelay := d.getRetrySettings(ctx)
 	if args.ReplacementRetry < maxRetries {
 
@@ -682,18 +726,19 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 
 		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
 			log.Warn().Err(err).Msg("failed to schedule replacement retry")
+			return false
 		}
-		return
+		return true
 	}
 
 	sp, err := d.DB.SeriesProvider.Get(ctx, args.ProviderID)
 	if err != nil {
-		return
+		return false
 	}
 
 	replacingSP, err := d.DB.SeriesProvider.Get(ctx, args.ReplacingProviderID)
 	if err != nil {
-		return
+		return false
 	}
 
 	nextProviders, err := d.DB.SeriesProvider.Query().
@@ -709,7 +754,7 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 		log.Info().
 			Str("title", args.Title).
 			Msg("replacement exhausted all better providers, keeping current copy")
-		return
+		return false
 	}
 
 	sort.Slice(nextProviders, func(i, j int) bool {
@@ -757,8 +802,9 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 			Str("title", args.Title).
 			Str("nextProvider", next.Provider).
 			Msg("replacement moving to next importance level")
-		break
+		return true
 	}
+	return false
 }
 
 // findChapterInProvider looks up a chapter by number in a provider's chapter list.
@@ -949,9 +995,12 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 		}
 	}
 
-	// Build set of already-downloaded chapter numbers for THIS provider
+	// Build set of already-downloaded or permanently failed chapter numbers for THIS provider
 	thisDownloaded := make(map[float64]bool)
 	for _, ch := range sp.Chapters {
+		if ch.Number != nil && ch.IsPermanentlyFailed {
+			thisDownloaded[*ch.Number] = true
+		}
 		if ch.Number != nil && ch.Filename != "" && !ch.IsDeleted {
 			thisDownloaded[*ch.Number] = true
 		}
@@ -964,6 +1013,7 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 		hasDisabledCopy      bool // A disabled/removed provider has this on disk
 		bestActiveDownloaded int  // Lowest importance of active providers with this chapter downloaded (-1 = none)
 		bestActiveAvailable  int  // Lowest importance of active providers with this chapter available (-1 = none)
+		permanentlyFailed    bool // Any provider has marked this chapter as permanently failed
 	}
 	otherChapters := make(map[float64]*chapterStatus)
 
@@ -988,6 +1038,11 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 			}
 			num := *ch.Number
 			status := ensureStatus(num)
+
+			// Track permanently failed chapters across providers
+			if ch.IsPermanentlyFailed {
+				status.permanentlyFailed = true
+			}
 
 			// Track downloaded chapters
 			if ch.Filename != "" && !ch.IsDeleted {
@@ -1028,6 +1083,10 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 		}
 		// Respect ContinueAfterChapter for imported series
 		if continueAfter > 0 && num <= continueAfter {
+			continue
+		}
+		// Skip if any provider has permanently failed this chapter
+		if status, ok := otherChapters[num]; ok && status.permanentlyFailed {
 			continue
 		}
 		// Check cross-provider availability
@@ -3111,12 +3170,14 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					}
 				}
 
-				// Fix DB record: clear filename, mark for re-download
+				// Fix DB record: clear filename, mark for re-download (unless permanently failed)
 				delete(trackedFiles, ch.Filename)
 				ch.Filename = ""
 				ch.DownloadDate = nil
 				ch.IsDeleted = false
-				ch.ShouldDownload = true
+				if !ch.IsPermanentlyFailed {
+					ch.ShouldDownload = true
+				}
 				result.MissingFiles++
 				result.FixedCount++
 				changed = true
@@ -3142,7 +3203,9 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					ch.Filename = ""
 					ch.DownloadDate = nil
 					ch.IsDeleted = false
-					ch.ShouldDownload = true
+					if !ch.IsPermanentlyFailed {
+						ch.ShouldDownload = true
+					}
 					result.MissingFiles++
 					result.FixedCount++
 					changed = true

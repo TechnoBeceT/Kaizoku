@@ -301,16 +301,26 @@ func (d *DownloadDispatcher) executeDownload(ctx context.Context, itemID uuid.UU
 			Str("chapter", chapStr).
 			Msg("chapter download failed")
 
-		// Mark as failed
+		// Mark as failed initially
 		d.db.DownloadQueueItem.UpdateOneID(itemID).
 			SetStatus(types.DLStatusFailed).
 			SetCompletedAt(time.Now()).
 			Save(ctx)
 
+		// Set the original item ID so cascade handlers can clean up
+		args.OriginalItemID = itemID
+
+		var retryScheduled bool
 		if args.IsReplacement {
-			d.deps.handleReplacementFailure(ctx, args)
+			retryScheduled = d.deps.handleReplacementFailure(ctx, args)
 		} else {
-			d.deps.cascadeOnFailure(ctx, args)
+			retryScheduled = d.deps.cascadeOnFailure(ctx, args)
+		}
+
+		// If a retry/fallback was enqueued, remove the old failed item
+		// so it doesn't show in Error Downloads prematurely
+		if retryScheduled {
+			d.db.DownloadQueueItem.DeleteOneID(itemID).Exec(ctx)
 		}
 		return
 	}

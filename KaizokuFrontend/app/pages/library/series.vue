@@ -31,7 +31,7 @@ const localProviders = ref<ProviderExtendedInfo[]>([])
 
 watch(() => series.value?.providers, (providers) => {
   if (providers) {
-    localProviders.value = [...providers].sort((a, b) => a.importance - b.importance)
+    localProviders.value = providers.map(p => ({ ...p })).sort((a, b) => a.importance - b.importance)
   }
 }, { immediate: true })
 
@@ -162,8 +162,16 @@ async function onDragEnd() {
   localProviders.value.forEach((p, i) => {
     p.importance = i
   })
-  const updated = { ...series.value, providers: localProviders.value }
-  await updateMutation.mutateAsync(updated as SeriesExtendedInfo)
+  try {
+    const updated = { ...series.value, providers: localProviders.value }
+    await updateMutation.mutateAsync(updated as SeriesExtendedInfo)
+  } catch {
+    // Revert to server state on failure
+    if (series.value?.providers) {
+      localProviders.value = series.value.providers.map(p => ({ ...p })).sort((a, b) => a.importance - b.importance)
+    }
+    toast.add({ title: 'Failed to save provider order', color: 'error' })
+  }
 }
 
 async function setExclusive(provider: ProviderExtendedInfo, field: 'useCover' | 'useTitle') {

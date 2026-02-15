@@ -10,10 +10,11 @@ type Chapter struct {
 	URL                string   `json:"url"`
 	ProviderIndex      int      `json:"providerIndex"`
 	DownloadDate       *time.Time `json:"downloadDate"`
-	ShouldDownload     bool     `json:"shouldDownload"`
-	IsDeleted          bool     `json:"isDeleted"`
-	PageCount          *int     `json:"pageCount"`
-	Filename           string   `json:"filename"`
+	ShouldDownload      bool     `json:"shouldDownload"`
+	IsDeleted           bool     `json:"isDeleted"`
+	IsPermanentlyFailed bool     `json:"isPermanentlyFailed"`
+	PageCount           *int     `json:"pageCount"`
+	Filename            string   `json:"filename"`
 }
 
 // SuwayomiChapter represents a chapter from the Suwayomi API.

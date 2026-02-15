@@ -30,6 +30,7 @@ type DownloadChapterArgs struct {
 	// Cascade fields — providers to try on failure, sorted by importance.
 	FallbackProviders []FallbackSource `json:"fallbackProviders,omitempty"`
 	CascadeRetries    int              `json:"cascadeRetries"`
+	OriginalItemID    uuid.UUID        `json:"originalItemId,omitempty"` // Queue item ID for cleanup on cascade
 
 	// Replacement fields — set when this download replaces an inferior copy.
 	IsReplacement       bool      `json:"isReplacement,omitempty"`
