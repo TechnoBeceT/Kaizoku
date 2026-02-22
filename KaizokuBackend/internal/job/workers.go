@@ -555,11 +555,16 @@ func (d *Deps) handleDownloadSuccess(ctx context.Context, args types.DownloadCha
 		return
 	}
 
+	// Always clean up inferior copies — any provider that downloads a chapter
+	// should remove copies from less-important providers.
+	d.cleanupInferiorCopies(ctx, args)
+
+	// If we're already the top priority, no need to schedule upward replacement.
 	if sp.Importance == 0 {
-		d.cleanupInferiorCopies(ctx, args)
 		return
 	}
 
+	// Schedule replacement from a better provider if one has the chapter.
 	betterProviders, err := d.DB.SeriesProvider.Query().
 		Where(
 			seriesprovider.SeriesIDEQ(args.SeriesID),
@@ -621,23 +626,29 @@ func (d *Deps) handleDownloadSuccess(ctx context.Context, args types.DownloadCha
 	}
 }
 
-// cleanupInferiorCopies deletes chapter copies from less-important providers.
+// cleanupInferiorCopies deletes chapter copies from less-important (higher importance value) providers.
 func (d *Deps) cleanupInferiorCopies(ctx context.Context, args types.DownloadChapterArgs) {
 	if args.ChapterNumber == nil {
 		return
 	}
 
-	allProviders, err := d.DB.SeriesProvider.Query().
+	sp, err := d.DB.SeriesProvider.Get(ctx, args.ProviderID)
+	if err != nil {
+		return
+	}
+
+	inferiorProviders, err := d.DB.SeriesProvider.Query().
 		Where(
 			seriesprovider.SeriesIDEQ(args.SeriesID),
 			seriesprovider.IDNEQ(args.ProviderID),
+			seriesprovider.ImportanceGT(sp.Importance),
 		).
 		All(ctx)
 	if err != nil {
 		return
 	}
 
-	for _, other := range allProviders {
+	for _, other := range inferiorProviders {
 		chapters := make([]types.Chapter, len(other.Chapters))
 		copy(chapters, other.Chapters)
 		changed := false
@@ -673,40 +684,10 @@ func (d *Deps) cleanupInferiorCopies(ctx context.Context, args types.DownloadCha
 }
 
 // handleReplacementSuccess is called when a replacement download succeeds.
+// It cleans up ALL inferior copies, not just the specific one being replaced.
 func (d *Deps) handleReplacementSuccess(ctx context.Context, args types.DownloadChapterArgs) {
-	if args.ReplacingFilename == "" {
-		return
-	}
-
-	oldPath := filepath.Join(d.Config.Storage.Folder, args.StoragePath, args.ReplacingFilename)
-	if err := os.Remove(oldPath); err != nil && !os.IsNotExist(err) {
-		log.Warn().Err(err).Str("file", args.ReplacingFilename).Msg("failed to delete replaced file")
-	}
-
-	oldSP, err := d.DB.SeriesProvider.Get(ctx, args.ReplacingProviderID)
-	if err != nil {
-		return
-	}
-
-	chapters := make([]types.Chapter, len(oldSP.Chapters))
-	copy(chapters, oldSP.Chapters)
-	changed := false
-
-	for i, ch := range chapters {
-		if ch.Number != nil && args.ChapterNumber != nil && *ch.Number == *args.ChapterNumber {
-			chapters[i].IsDeleted = true
-			chapters[i].Filename = ""
-			changed = true
-			break
-		}
-	}
-
-	if changed {
-		if _, err := d.DB.SeriesProvider.UpdateOneID(oldSP.ID).
-			SetChapters(chapters).Save(ctx); err != nil {
-			log.Warn().Err(err).Str("provider", oldSP.Provider).Msg("failed to update chapters after replacement")
-		}
-	}
+	// Clean up all inferior copies from less-important providers
+	d.cleanupInferiorCopies(ctx, args)
 
 	log.Info().
 		Str("title", args.Title).
@@ -877,6 +858,20 @@ func (w *GetChaptersWorker) Work(ctx context.Context, job *river.Job[GetChapters
 		"get_chapters", "success", chDuration,
 		util.WithItemsCount(len(onlineChapters)), util.WithMetadata(chMeta))
 
+	// Reconcile online chapters with stored chapter list.
+	// This ensures newly available chapters are tracked in the DB even if they
+	// weren't present when the series was first added.
+	reconciledChapters, chaptersChanged := reconcileChapters(sp, onlineChapters)
+	if chaptersChanged {
+		if saved, err := w.Deps.DB.SeriesProvider.UpdateOneID(sp.ID).
+			SetChapters(reconciledChapters).
+			Save(ctx); err != nil {
+			log.Warn().Err(err).Msg("failed to save reconciled chapters")
+		} else {
+			sp = saved // Use the saved entity so sp.Chapters is up-to-date
+		}
+	}
+
 	// Load series info
 	series, err := w.Deps.DB.Series.Get(ctx, sp.SeriesID)
 	if err != nil {
@@ -975,6 +970,93 @@ func (w *GetChaptersWorker) Work(ctx context.Context, job *river.Job[GetChapters
 	}
 
 	return nil
+}
+
+// reconcileChapters merges online chapters from Suwayomi into the provider's stored
+// chapter list. New chapters are added with ShouldDownload=true so they get picked up
+// by generateDownloads. Existing chapters get metadata updates (URL, index, page count)
+// but their download state is preserved.
+func reconcileChapters(sp *ent.SeriesProvider, onlineChapters []suwayomi.SuwayomiChapter) ([]types.Chapter, bool) {
+	// Build map of existing chapters by number
+	existingByNum := make(map[float64]int) // chapter number -> index in chapters slice
+	for i, ch := range sp.Chapters {
+		if ch.Number != nil {
+			existingByNum[*ch.Number] = i
+		}
+	}
+
+	// Filter online chapters by scanlator (same logic as generateDownloads)
+	var filtered []suwayomi.SuwayomiChapter
+	for _, ch := range onlineChapters {
+		scanlator := ""
+		if ch.Scanlator != nil {
+			scanlator = *ch.Scanlator
+		}
+		if sp.Scanlator == "" || sp.Scanlator == sp.Provider {
+			filtered = append(filtered, ch)
+		} else if strings.EqualFold(scanlator, sp.Scanlator) {
+			filtered = append(filtered, ch)
+		}
+	}
+
+	chapters := make([]types.Chapter, len(sp.Chapters))
+	copy(chapters, sp.Chapters)
+	changed := false
+
+	for _, online := range filtered {
+		if online.ChapterNumber == nil {
+			continue
+		}
+		num := *online.ChapterNumber
+
+		if idx, exists := existingByNum[num]; exists {
+			// Update metadata for existing chapters (preserve download state)
+			ch := &chapters[idx]
+			if ch.URL != online.URL && online.URL != "" {
+				ch.URL = online.URL
+				changed = true
+			}
+			if ch.ProviderIndex != online.Index {
+				ch.ProviderIndex = online.Index
+				changed = true
+			}
+			if online.Name != "" && ch.Name != online.Name {
+				ch.Name = online.Name
+				changed = true
+			}
+			if online.PageCount > 0 {
+				pc := online.PageCount
+				if ch.PageCount == nil || *ch.PageCount != pc {
+					ch.PageCount = &pc
+					changed = true
+				}
+			}
+		} else {
+			// New chapter from source — add to stored list
+			var uploadDate *time.Time
+			if online.UploadDate > 0 {
+				t := time.UnixMilli(online.UploadDate).UTC()
+				uploadDate = &t
+			}
+			newCh := types.Chapter{
+				Name:               online.Name,
+				Number:             online.ChapterNumber,
+				ProviderUploadDate: uploadDate,
+				URL:                online.URL,
+				ProviderIndex:      online.Index,
+				ShouldDownload:     true,
+			}
+			if online.PageCount > 0 {
+				pc := online.PageCount
+				newCh.PageCount = &pc
+			}
+			chapters = append(chapters, newCh)
+			existingByNum[num] = len(chapters) - 1
+			changed = true
+		}
+	}
+
+	return chapters, changed
 }
 
 // generateDownloads compares online chapters with local data across all providers
@@ -3261,18 +3343,14 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 		log.Warn().Err(err).Msg("verify: failed to regenerate kaizoku.json")
 	}
 
-	// Enqueue GetChapters for affected providers to trigger re-downloads
-	for provID := range affectedProviderIDs {
-		sp, err := d.DB.SeriesProvider.Get(ctx, provID)
-		if err != nil {
-			continue
-		}
-		// Only re-download for active, non-unknown providers
+	// Enqueue GetChapters for ALL active providers to trigger re-downloads
+	// and chapter reconciliation (discovers new chapters from source).
+	for _, sp := range providers {
 		if sp.IsDisabled || sp.IsUnknown || sp.IsUninstalled {
 			continue
 		}
-		if _, err := d.enqueueGetChapters(ctx, provID); err != nil {
-			log.Warn().Err(err).Str("providerId", provID.String()).Msg("verify: failed to enqueue GetChapters")
+		if _, err := d.enqueueGetChapters(ctx, sp.ID); err != nil {
+			log.Warn().Err(err).Str("providerId", sp.ID.String()).Msg("verify: failed to enqueue GetChapters")
 		} else {
 			result.RedownloadQueued++
 		}
