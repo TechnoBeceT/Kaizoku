@@ -125,6 +125,18 @@ export function useDownloadsMetrics() {
   })
 }
 
+export function useClearAllErrors() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => downloadsService.deleteAllErrors(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'failed'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'failed-with-count'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'metrics'] })
+    },
+  })
+}
+
 export function useManageErrorDownload() {
   const queryClient = useQueryClient()
 

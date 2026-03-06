@@ -50,6 +50,10 @@ export const downloadsService = {
     return apiClient.get<DownloadsMetrics>('/api/downloads/metrics')
   },
 
+  async deleteAllErrors(): Promise<{ deleted: number }> {
+    return apiClient.delete<{ deleted: number }>('/api/downloads/errors')
+  },
+
   async manageErrorDownload(id: string, action: ErrorDownloadAction): Promise<void> {
     const params = new URLSearchParams()
     params.append('id', id)

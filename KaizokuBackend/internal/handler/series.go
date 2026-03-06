@@ -472,6 +472,8 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 	}
 
 	ctx := c.Request().Context()
+	jobID := fmt.Sprintf("deep-verify-%s", idStr)
+	broadcast := h.jobDeps.Progress
 
 	s, err := h.db.Series.Get(ctx, uid)
 	if err != nil {
@@ -499,11 +501,34 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 		SourceIssues:    []types.SourceIssue{},
 	}
 
+	// Count total chapters to check for progress
+	totalChapters := 0
+	for _, p := range providers {
+		for _, ch := range p.Chapters {
+			if ch.Filename != "" && !ch.IsDeleted {
+				totalChapters++
+			}
+		}
+	}
+	totalSteps := len(providers) + totalChapters // source checks + chapter checks
+	currentStep := 0
+
+	broadcast.BroadcastProgress(jobID, int(types.JobTypeDeepVerify),
+		int(types.ProgressStatusRunning), 0,
+		fmt.Sprintf("Starting deep verify for %s...", s.Title), nil)
+
 	// 1. Source link verification — check Suwayomi still has the right manga
 	for _, p := range providers {
+		currentStep++
+		pct := float64(currentStep) / float64(totalSteps) * 100
+
 		if p.IsUnknown || p.IsDisabled || p.SuwayomiID == 0 {
 			continue
 		}
+
+		broadcast.BroadcastProgress(jobID, int(types.JobTypeDeepVerify),
+			int(types.ProgressStatusRunning), pct,
+			fmt.Sprintf("Checking source link: %s", p.Provider), nil)
 
 		suwayomiData, err := h.suwayomi.GetManga(ctx, p.SuwayomiID)
 		if err != nil {
@@ -537,11 +562,19 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 				continue
 			}
 
-			archivePath := filepath.Join(seriesDir, ch.Filename)
+			currentStep++
+			pct := float64(currentStep) / float64(totalSteps) * 100
+
 			chapNum := ""
 			if ch.Number != nil {
 				chapNum = util.FormatChapterNumber(*ch.Number)
 			}
+
+			broadcast.BroadcastProgress(jobID, int(types.JobTypeDeepVerify),
+				int(types.ProgressStatusRunning), pct,
+				fmt.Sprintf("Checking Ch.%s from %s", chapNum, p.Provider), nil)
+
+			archivePath := filepath.Join(seriesDir, ch.Filename)
 
 			// 2a. Page count truncation check
 			if ch.PageCount != nil && *ch.PageCount > 0 {
@@ -618,7 +651,18 @@ func (h *SeriesHandler) DeepVerify(c echo.Context) error {
 		}
 	}
 
+	status := types.ProgressStatusCompleted
+	msg := fmt.Sprintf("Deep verify complete: %d suspicious files, %d source issues",
+		len(result.SuspiciousFiles), len(result.SourceIssues))
+	if !result.Success {
+		msg = fmt.Sprintf("Deep verify found issues: %d suspicious files, %d source issues",
+			len(result.SuspiciousFiles), len(result.SourceIssues))
+	}
+
 	result.Success = len(result.SuspiciousFiles) == 0 && len(result.SourceIssues) == 0
+	broadcast.BroadcastProgress(jobID, int(types.JobTypeDeepVerify),
+		int(status), 100, msg, nil)
+
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -1902,11 +1946,15 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 			pei.ChapterCount = *p.ChapterCount
 		}
 
-		// Find last chapter and download info
+		// Find last chapter, download info, and count permanently failed chapters
 		var pMaxChapter *float64
 		var pLastChangeTime time.Time
 		chapterNums := make([]float64, 0)
+		failedCount := 0
 		for _, ch := range p.Chapters {
+			if ch.IsPermanentlyFailed {
+				failedCount++
+			}
 			if ch.Number != nil {
 				chapterNums = append(chapterNums, *ch.Number)
 				if pMaxChapter == nil || *ch.Number > *pMaxChapter {
@@ -1936,6 +1984,7 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 			}
 		}
 
+		pei.FailedChapterCount = failedCount
 		pei.LastChapter = pMaxChapter
 		if !pLastChangeTime.IsZero() {
 			pei.LastChangeUTC = pLastChangeTime.UTC().Format(time.RFC3339)
@@ -1961,6 +2010,41 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 		info.LastChangeProvider = &types.SmallProviderInfo{}
 		minTime := time.Time{}.UTC().Format(time.RFC3339)
 		info.LastChangeUTC = &minTime
+	}
+
+	// Detect orphan files (on disk but not tracked in any provider)
+	if storagePath != "" {
+		trackedFiles := make(map[string]bool)
+		trackedChapters := make(map[float64]bool) // chapters with a downloaded file
+		activeProviders := make(map[string]bool)  // normalized provider names
+		for _, p := range providers {
+			activeProviders[normalizeProviderName(p.Provider)] = true
+			for _, ch := range p.Chapters {
+				if ch.Filename != "" && !ch.IsDeleted {
+					trackedFiles[ch.Filename] = true
+					if ch.Number != nil {
+						trackedChapters[*ch.Number] = true
+					}
+				}
+			}
+		}
+		if entries, err := os.ReadDir(storagePath); err == nil {
+			for _, entry := range entries {
+				if entry.IsDir() || !util.IsArchive(entry.Name()) {
+					continue
+				}
+				if trackedFiles[entry.Name()] {
+					continue
+				}
+				orphan := types.OrphanFileInfo{Filename: entry.Name()}
+				orphan.Provider, orphan.Language, orphan.ChapterNumber = parseOrphanFilename(entry.Name())
+				// Duplicate if: chapter exists from any tracked provider, OR file belongs to an active provider
+				if (orphan.ChapterNumber != nil && trackedChapters[*orphan.ChapterNumber]) || activeProviders[normalizeProviderName(orphan.Provider)] {
+					orphan.IsDuplicate = true
+				}
+				info.OrphanFiles = append(info.OrphanFiles, orphan)
+			}
+		}
 	}
 
 	return info
@@ -2456,6 +2540,57 @@ func formatFloat(f float64) string {
 		return strconv.Itoa(int(f))
 	}
 	return strconv.FormatFloat(f, 'f', -1, 64)
+}
+
+// normalizeProviderName strips non-alphanumeric characters and lowercases for fuzzy matching.
+// e.g. "Comix · HiveToons" and "Comix-HiveToons" both become "comixhivetoons".
+func normalizeProviderName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// parseOrphanFilename extracts provider, language, and chapter number from a CBZ filename.
+// Expected format: [Provider][lang] Title ChapterNum.cbz
+func parseOrphanFilename(filename string) (provider, language string, chapterNum *float64) {
+	name := strings.TrimSuffix(filename, filepath.Ext(filename))
+
+	// Extract provider: first [...]
+	if idx := strings.Index(name, "["); idx >= 0 {
+		if end := strings.Index(name[idx:], "]"); end >= 0 {
+			provider = name[idx+1 : idx+end]
+			name = name[idx+end+1:]
+		}
+	}
+
+	// Extract language: next [...]
+	if idx := strings.Index(name, "["); idx >= 0 {
+		if end := strings.Index(name[idx:], "]"); end >= 0 {
+			language = name[idx+1 : idx+end]
+			name = name[idx+end+1:]
+		}
+	}
+
+	// Chapter number is the last number before .cbz
+	// Trim and find the trailing number (may include decimal like 221.5)
+	name = strings.TrimSpace(name)
+	// Walk backwards to find the number
+	i := len(name) - 1
+	for i >= 0 && (name[i] == '.' || (name[i] >= '0' && name[i] <= '9')) {
+		i--
+	}
+	numStr := strings.TrimRight(name[i+1:], ".")
+	if numStr != "" {
+		if n, err := strconv.ParseFloat(numStr, 64); err == nil {
+			chapterNum = &n
+		}
+	}
+
+	return
 }
 
 // saveKaizokuJSON loads a series + providers and writes kaizoku.json to the storage directory.

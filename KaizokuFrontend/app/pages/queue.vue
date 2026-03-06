@@ -11,6 +11,7 @@ const { data: completedData } = useCompletedDownloadsWithCount(limit, computed((
 const { data: scheduledData } = useWaitingDownloadsWithCount(limit, computed(() => debouncedSearchTerm.value.trim() || undefined))
 const { data: failedData } = useFailedDownloadsWithCount(limit, computed(() => debouncedSearchTerm.value.trim() || undefined))
 const manageError = useManageErrorDownload()
+const clearAllErrors = useClearAllErrors()
 
 const showCompletedModal = ref(false)
 const showScheduledModal = ref(false)
@@ -22,6 +23,10 @@ function handleRetry(id: string) {
 
 function handleDeleteError(id: string) {
   manageError.mutate({ id, action: ErrorDownloadAction.Delete })
+}
+
+function handleClearAllErrors() {
+  clearAllErrors.mutate()
 }
 </script>
 
@@ -117,14 +122,26 @@ function handleDeleteError(id: string) {
             <span class="font-semibold">Error Downloads</span>
             <UBadge>{{ failedData?.totalCount || 0 }}</UBadge>
           </div>
-          <UButton
-            v-if="failedData && failedData.totalCount > (failedData.downloads?.length || 0)"
-            size="xs"
-            variant="outline"
-            label="View All"
-            icon="i-lucide-expand"
-            @click="showFailedModal = true"
-          />
+          <div class="flex items-center gap-2">
+            <UButton
+              v-if="failedData && failedData.totalCount > 0"
+              size="xs"
+              variant="outline"
+              color="error"
+              label="Clear All"
+              icon="i-lucide-trash-2"
+              :loading="clearAllErrors.isPending.value"
+              @click="handleClearAllErrors"
+            />
+            <UButton
+              v-if="failedData && failedData.totalCount > (failedData.downloads?.length || 0)"
+              size="xs"
+              variant="outline"
+              label="View All"
+              icon="i-lucide-expand"
+              @click="showFailedModal = true"
+            />
+          </div>
         </div>
       </template>
       <div v-if="!failedData?.downloads?.length" class="flex items-center justify-center py-8 text-muted">

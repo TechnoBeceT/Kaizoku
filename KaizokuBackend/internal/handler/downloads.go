@@ -112,3 +112,16 @@ func (h *DownloadsHandler) ManageErrorDownload(c echo.Context) error {
 
 	return c.JSON(http.StatusOK, nil)
 }
+
+// DeleteAllErrors removes all failed downloads from the queue.
+// DELETE /api/downloads/errors
+func (h *DownloadsHandler) DeleteAllErrors(c echo.Context) error {
+	ctx := c.Request().Context()
+	deleted, err := h.downloads.DeleteAllFailed(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to delete all failed downloads")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to delete failed downloads"})
+	}
+	log.Info().Int("deleted", deleted).Msg("deleted all failed downloads")
+	return c.JSON(http.StatusOK, map[string]int{"deleted": deleted})
+}

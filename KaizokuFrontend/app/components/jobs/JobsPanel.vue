@@ -5,17 +5,51 @@ const { startWizard } = useImportWizardState()
 
 const isUpdateAllRunning = ref(false)
 const updateAllMutation = useUpdateAllSeries()
+const verifyAllMutation = useVerifyAll()
+const isVerifyAllRunning = ref(false)
+
 const { getProgressForJob, isJobCompleted, isJobFailed, getJobProgress } = useSignalRProgress({
-  jobTypes: [JobType.UpdateAllSeries],
-  onComplete: () => { isUpdateAllRunning.value = false },
-  onError: () => { isUpdateAllRunning.value = false },
+  jobTypes: [JobType.UpdateAllSeries, JobType.VerifyAll],
+  onComplete: (jobType) => {
+    if (jobType === JobType.UpdateAllSeries) isUpdateAllRunning.value = false
+    if (jobType === JobType.VerifyAll) isVerifyAllRunning.value = false
+  },
+  onError: (_error, jobType) => {
+    if (jobType === JobType.UpdateAllSeries) isUpdateAllRunning.value = false
+    if (jobType === JobType.VerifyAll) isVerifyAllRunning.value = false
+  },
 })
 
 const updateProgress = computed(() => getProgressForJob(JobType.UpdateAllSeries))
-const isCompleted = computed(() => isJobCompleted(JobType.UpdateAllSeries))
-const isFailed = computed(() => isJobFailed(JobType.UpdateAllSeries))
-const progressValue = computed(() => isCompleted.value ? 100 : (getJobProgress(JobType.UpdateAllSeries) || 0))
-const showProgress = computed(() => updateProgress.value !== null || isUpdateAllRunning.value)
+const isUpdateCompleted = computed(() => isJobCompleted(JobType.UpdateAllSeries))
+const isUpdateFailed = computed(() => isJobFailed(JobType.UpdateAllSeries))
+const updateProgressValue = computed(() => isUpdateCompleted.value ? 100 : (getJobProgress(JobType.UpdateAllSeries) || 0))
+const showUpdateProgress = computed(() => updateProgress.value !== null || isUpdateAllRunning.value)
+
+const verifyProgress = computed(() => getProgressForJob(JobType.VerifyAll))
+const isVerifyCompleted = computed(() => isJobCompleted(JobType.VerifyAll))
+const isVerifyFailed = computed(() => isJobFailed(JobType.VerifyAll))
+const verifyProgressValue = computed(() => isVerifyCompleted.value ? 100 : (getJobProgress(JobType.VerifyAll) || 0))
+const showVerifyProgress = computed(() => verifyProgress.value !== null || isVerifyAllRunning.value)
+
+interface SeriesOrphanInfo {
+  seriesId: string
+  title: string
+  orphans: string[]
+}
+interface VerifyResult {
+  totalSeries: number
+  badFiles: number
+  missingFiles: number
+  orphanFiles: number
+  fixedCount: number
+  seriesWithOrphans: SeriesOrphanInfo[]
+}
+const verifyResult = computed<VerifyResult | null>(() => {
+  const param = verifyProgress.value?.parameter as VerifyResult | undefined
+  return param?.totalSeries !== undefined ? param : null
+})
+const showOrphanDetails = ref(false)
 
 async function handleUpdateAll() {
   try {
@@ -23,6 +57,15 @@ async function handleUpdateAll() {
     await updateAllMutation.mutateAsync()
   } catch {
     isUpdateAllRunning.value = false
+  }
+}
+
+async function handleVerifyAll() {
+  try {
+    isVerifyAllRunning.value = true
+    await verifyAllMutation.mutateAsync()
+  } catch {
+    isVerifyAllRunning.value = false
   }
 }
 </script>
@@ -56,18 +99,32 @@ async function handleUpdateAll() {
         </p>
       </div>
 
-      <!-- Progress -->
-      <div v-if="showProgress" class="space-y-2">
-        <UCard :class="{ 'ring-2 ring-primary': !isCompleted && !isFailed && updateProgress }">
+      <!-- Verify All Series -->
+      <div class="space-y-2">
+        <UButton
+          size="sm"
+          icon="i-lucide-shield-check"
+          label="Verify All Series"
+          :loading="verifyAllMutation.isPending.value || isVerifyAllRunning"
+          @click="handleVerifyAll"
+        />
+        <p class="text-sm text-muted">
+          Checks all series for missing, corrupt, or duplicate files. Fixes DB records and queues re-downloads for broken chapters.
+        </p>
+      </div>
+
+      <!-- Update All Progress -->
+      <div v-if="showUpdateProgress" class="space-y-2">
+        <UCard :class="{ 'ring-2 ring-primary': !isUpdateCompleted && !isUpdateFailed && updateProgress }">
           <div class="space-y-2">
             <div class="flex items-center gap-3">
               <UIcon
-                v-if="isFailed"
+                v-if="isUpdateFailed"
                 name="i-lucide-alert-circle"
                 class="size-5 text-error"
               />
               <UIcon
-                v-else-if="isCompleted"
+                v-else-if="isUpdateCompleted"
                 name="i-lucide-check-circle"
                 class="size-5 text-primary"
               />
@@ -77,19 +134,51 @@ async function handleUpdateAll() {
                 class="size-5 text-primary animate-spin"
               />
               <span class="font-medium">Updating All Series</span>
-              <span v-if="isFailed" class="text-sm text-error">Failed</span>
+              <span v-if="isUpdateFailed" class="text-sm text-error">Failed</span>
             </div>
-            <UProgress :model-value="progressValue" size="xs" />
+            <UProgress :model-value="updateProgressValue" size="xs" />
             <div class="flex justify-between text-sm text-muted">
               <span>{{ updateProgress?.message || 'Processing...' }}</span>
-              <span>{{ Math.round(progressValue) }}%</span>
+              <span>{{ Math.round(updateProgressValue) }}%</span>
             </div>
           </div>
         </UCard>
       </div>
 
-      <!-- Completion -->
-      <div v-if="isCompleted" class="bg-success/10 border border-success/20 rounded-lg p-4">
+      <!-- Verify All Progress -->
+      <div v-if="showVerifyProgress" class="space-y-2">
+        <UCard :class="{ 'ring-2 ring-primary': !isVerifyCompleted && !isVerifyFailed && verifyProgress }">
+          <div class="space-y-2">
+            <div class="flex items-center gap-3">
+              <UIcon
+                v-if="isVerifyFailed"
+                name="i-lucide-alert-circle"
+                class="size-5 text-error"
+              />
+              <UIcon
+                v-else-if="isVerifyCompleted"
+                name="i-lucide-check-circle"
+                class="size-5 text-primary"
+              />
+              <UIcon
+                v-else
+                name="i-lucide-loader-circle"
+                class="size-5 text-primary animate-spin"
+              />
+              <span class="font-medium">Verifying All Series</span>
+              <span v-if="isVerifyFailed" class="text-sm text-error">Failed</span>
+            </div>
+            <UProgress :model-value="verifyProgressValue" size="xs" />
+            <div class="flex justify-between text-sm text-muted">
+              <span>{{ verifyProgress?.message || 'Processing...' }}</span>
+              <span>{{ Math.round(verifyProgressValue) }}%</span>
+            </div>
+          </div>
+        </UCard>
+      </div>
+
+      <!-- Update Completion -->
+      <div v-if="isUpdateCompleted" class="bg-success/10 border border-success/20 rounded-lg p-4">
         <div class="flex items-center gap-2">
           <UIcon name="i-lucide-check-circle" class="size-5 text-primary" />
           <span class="font-medium">Update All Series completed successfully!</span>
@@ -97,6 +186,47 @@ async function handleUpdateAll() {
         <p class="text-sm mt-1 text-muted">
           All series have been updated with consistent naming and metadata.
         </p>
+      </div>
+
+      <!-- Verify Completion -->
+      <div v-if="isVerifyCompleted" class="bg-success/10 border border-success/20 rounded-lg p-4 space-y-3">
+        <div class="flex items-center gap-2">
+          <UIcon name="i-lucide-check-circle" class="size-5 text-primary" />
+          <span class="font-medium">Verify All Series completed!</span>
+        </div>
+        <p class="text-sm text-muted">
+          {{ verifyProgress?.message || 'All series have been verified.' }}
+        </p>
+
+        <!-- Orphan details -->
+        <div v-if="verifyResult?.seriesWithOrphans?.length" class="space-y-2">
+          <UButton
+            size="xs"
+            variant="outline"
+            :icon="showOrphanDetails ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+            :label="`${verifyResult.seriesWithOrphans.length} series with orphan files`"
+            @click="showOrphanDetails = !showOrphanDetails"
+          />
+          <div v-if="showOrphanDetails" class="space-y-2 max-h-64 overflow-y-auto">
+            <div
+              v-for="s in verifyResult.seriesWithOrphans"
+              :key="s.seriesId"
+              class="bg-default rounded-lg p-3 space-y-1"
+            >
+              <NuxtLink
+                :to="`/library/series?id=${s.seriesId}`"
+                class="font-medium text-sm text-primary hover:underline"
+              >
+                {{ s.title }}
+              </NuxtLink>
+              <span class="text-sm text-muted ml-2">{{ s.orphans.length }} orphan{{ s.orphans.length === 1 ? '' : 's' }}</span>
+              <div class="text-xs text-muted pl-2">
+                <div v-for="file in s.orphans.slice(0, 5)" :key="file">{{ file }}</div>
+                <div v-if="s.orphans.length > 5" class="italic">...and {{ s.orphans.length - 5 }} more</div>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </UCard>

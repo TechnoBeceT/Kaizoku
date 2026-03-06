@@ -240,6 +240,9 @@ export enum JobType {
   Download = 6,
   UpdateExtensions = 7,
   UpdateAllSeries = 8,
+  DailyUpdate = 9,
+  VerifyAll = 10,
+  DeepVerify = 11,
 }
 
 export enum ProgressStatus {
@@ -347,6 +350,15 @@ export interface SeriesExtendedInfo extends BaseSeriesInfo {
   providers: ProviderExtendedInfo[]
   chapterList: string
   path?: string
+  orphanFiles?: OrphanFileInfo[]
+}
+
+export interface OrphanFileInfo {
+  filename: string
+  chapterNumber?: number
+  provider?: string
+  language?: string
+  isDuplicate: boolean
 }
 
 export interface ProviderExtendedInfo {
@@ -378,6 +390,7 @@ export interface ProviderExtendedInfo {
   lastChapter?: number
   lastChangeUTC: string
   chapterList: string
+  failedChapterCount: number
   matchId: string
 }
 

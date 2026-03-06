@@ -189,6 +189,16 @@ type SeriesExtendedInfo struct {
 	Providers          []ProviderExtendedInfo `json:"providers"`
 	ChapterList        string                 `json:"chapterList"`
 	Path               string                 `json:"path"`
+	OrphanFiles        []OrphanFileInfo       `json:"orphanFiles,omitempty"`
+}
+
+// OrphanFileInfo describes a file on disk not tracked by any provider.
+type OrphanFileInfo struct {
+	Filename       string   `json:"filename"`
+	ChapterNumber  *float64 `json:"chapterNumber,omitempty"`
+	Provider       string   `json:"provider,omitempty"`
+	Language       string   `json:"language,omitempty"`
+	IsDuplicate    bool     `json:"isDuplicate"`    // true = same chapter tracked by another provider (safe to delete)
 }
 
 // ProviderExtendedInfo is the detailed provider view within a series.
@@ -221,6 +231,7 @@ type ProviderExtendedInfo struct {
 	LastChapter          *float64          `json:"lastChapter"`
 	LastChangeUTC        string            `json:"lastChangeUTC"`
 	ChapterList          string            `json:"chapterList"`
+	FailedChapterCount   int               `json:"failedChapterCount"`
 	MatchID              string            `json:"matchId"`
 }
 

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import draggable from 'vuedraggable'
-import { type SeriesExtendedInfo, type ProviderExtendedInfo, SeriesStatus, QueueStatus } from '~/types'
+import { type SeriesExtendedInfo, type ProviderExtendedInfo, SeriesStatus, QueueStatus, JobType } from '~/types'
 import { getStatusDisplay } from '~/utils/series-status'
 import { getCountryCodeForLanguage } from '~/utils/language-country-map'
 import { getApiConfig } from '~/utils/api-config'
@@ -25,6 +25,17 @@ const deleteProviderPhysical = ref(false)
 const providerToDelete = ref<ProviderExtendedInfo | null>(null)
 const matchingProviderId = ref<string | null>(null)
 const toast = useToast()
+
+// Deep verify progress tracking
+const { getProgressForJob, isJobCompleted: isDeepVerifyCompleted, isJobFailed: isDeepVerifyFailed, getJobProgress: getDeepVerifyProgress } = useSignalRProgress({
+  jobTypes: [JobType.DeepVerify],
+})
+const deepVerifyProgress = computed(() => getProgressForJob(JobType.DeepVerify))
+const deepVerifyPct = computed(() => isDeepVerifyCompleted(JobType.DeepVerify) ? 100 : (getDeepVerifyProgress(JobType.DeepVerify) || 0))
+const showDeepVerifyProgress = computed(() => {
+  const p = deepVerifyProgress.value
+  return p !== null && !isDeepVerifyCompleted(JobType.DeepVerify) && !isDeepVerifyFailed(JobType.DeepVerify)
+})
 
 // Local copy of providers for drag-and-drop reordering
 const localProviders = ref<ProviderExtendedInfo[]>([])
@@ -87,6 +98,14 @@ const effectiveStatus = computed(() => {
   return series.value?.status ?? SeriesStatus.UNKNOWN
 })
 
+// Orphan file categories
+const untrackedOrphans = computed(() =>
+  (series.value?.orphanFiles || []).filter(f => !f.isDuplicate)
+)
+const duplicateOrphans = computed(() =>
+  (series.value?.orphanFiles || []).filter(f => f.isDuplicate)
+)
+
 // Sorted downloads: by status (running first, then waiting, completed, failed), then by chapter number ascending
 const sortedDownloads = computed(() => {
   if (!downloads.value?.length) return []
@@ -125,15 +144,15 @@ async function togglePause() {
 async function handleVerify() {
   if (!series.value) return
   const result = await verifyMutation.mutateAsync(series.value.id)
-  if (result.success && result.missingFiles === 0 && result.orphanFiles.length === 0) {
+  const parts: string[] = []
+  if (result.badFiles.length > 0) parts.push(`${result.badFiles.length} bad files`)
+  if (result.missingFiles > 0) parts.push(`${result.missingFiles} missing files`)
+  if (result.orphanFiles.length > 0) parts.push(`${result.orphanFiles.length} orphan files`)
+  if (result.fixedCount > 0) parts.push(`${result.fixedCount} records fixed`)
+  if (result.redownloadQueued > 0) parts.push(`${result.redownloadQueued} providers queued`)
+  if (parts.length === 0) {
     toast.add({ title: 'All files are valid', color: 'success' })
   } else {
-    const parts: string[] = []
-    if (result.badFiles.length > 0) parts.push(`${result.badFiles.length} bad files`)
-    if (result.missingFiles > 0) parts.push(`${result.missingFiles} missing files`)
-    if (result.orphanFiles.length > 0) parts.push(`${result.orphanFiles.length} orphan files`)
-    if (result.fixedCount > 0) parts.push(`${result.fixedCount} records fixed`)
-    if (result.redownloadQueued > 0) parts.push(`${result.redownloadQueued} re-downloads queued`)
     toast.add({ title: `Verify: ${parts.join(', ')}`, color: result.fixedCount > 0 ? 'warning' : 'info' })
   }
 }
@@ -346,6 +365,21 @@ function formatDate(dateStr?: string): string {
           </div>
         </UCard>
 
+        <!-- Deep Verify Progress -->
+        <UCard v-if="showDeepVerifyProgress || deepVerifyMutation.isPending.value" class="ring-2 ring-primary">
+          <div class="space-y-2">
+            <div class="flex items-center gap-3">
+              <UIcon name="i-lucide-loader-circle" class="size-5 text-primary animate-spin" />
+              <span class="font-medium">Deep Verify in Progress</span>
+            </div>
+            <UProgress :model-value="deepVerifyPct" size="xs" />
+            <div class="flex justify-between text-sm text-muted">
+              <span>{{ deepVerifyProgress?.message || 'Processing...' }}</span>
+              <span>{{ Math.round(deepVerifyPct) }}%</span>
+            </div>
+          </div>
+        </UCard>
+
         <!-- Sources Card -->
         <UCard>
           <template #header>
@@ -462,6 +496,7 @@ function formatDate(dateStr?: string): string {
                     <!-- Chapter List + Last Chapter -->
                     <div class="flex flex-wrap items-center gap-2 text-sm">
                       <UBadge v-if="provider.chapterList" variant="subtle">{{ provider.chapterList }}</UBadge>
+                      <UBadge v-if="provider.failedChapterCount > 0" color="error" size="xs">{{ provider.failedChapterCount }} failed</UBadge>
                       <span v-if="provider.lastChapter" class="text-muted">
                         Last: <UBadge variant="subtle">{{ provider.lastChapter }}</UBadge>
                       </span>
@@ -523,9 +558,9 @@ function formatDate(dateStr?: string): string {
         </UCard>
       </div>
 
-      <!-- Right Column: Downloads Panel (1/5 width) -->
-      <div class="lg:col-span-1">
-        <UCard class="sticky top-4">
+      <!-- Right Column: Downloads Panel + Orphans (1/5 width) -->
+      <div class="lg:col-span-1 sticky top-4 space-y-4 max-h-[calc(100vh-2rem)] overflow-y-auto">
+        <UCard>
           <template #header>
             <div class="flex items-center gap-2">
               <UIcon name="i-lucide-download" class="size-5" />
@@ -542,6 +577,41 @@ function formatDate(dateStr?: string): string {
           </div>
           <div v-else class="space-y-2 max-h-[calc(100vh-10rem)] overflow-y-auto">
             <QueueDownloadCard v-for="dl in sortedDownloads" :key="dl.id" :download="dl" />
+          </div>
+        </UCard>
+
+        <!-- Orphan Files -->
+        <UCard v-if="untrackedOrphans.length > 0 || duplicateOrphans.length > 0">
+          <template #header>
+            <div class="flex items-center gap-2">
+              <UIcon name="i-lucide-file-question" class="size-5 text-warning" />
+              <span class="font-semibold">Orphan Files</span>
+              <UBadge color="warning" size="xs">{{ (series?.orphanFiles?.length || 0) }}</UBadge>
+            </div>
+          </template>
+
+          <!-- Untracked: chapter not in any provider -->
+          <div v-if="untrackedOrphans.length > 0" class="space-y-2">
+            <p class="text-sm font-medium text-warning">Untracked Chapters</p>
+            <p class="text-xs text-muted">No source has these chapters. Deleting would lose them.</p>
+            <div class="space-y-1 max-h-48 overflow-y-auto">
+              <div v-for="file in untrackedOrphans" :key="file.filename" class="text-xs font-mono flex items-center gap-2">
+                <UBadge v-if="file.provider" size="xs" variant="subtle">{{ file.provider }}</UBadge>
+                <span v-if="file.chapterNumber" class="text-muted">Ch.{{ file.chapterNumber }}</span>
+                <span class="truncate text-muted" :title="file.filename">{{ file.filename }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Duplicates: safe to delete -->
+          <div v-if="duplicateOrphans.length > 0" class="mt-3 space-y-2">
+            <p class="text-sm font-medium text-muted">Duplicates (safe to delete)</p>
+            <p class="text-xs text-muted">These chapters already exist from a tracked source.</p>
+            <div class="space-y-1 max-h-32 overflow-y-auto">
+              <div v-for="file in duplicateOrphans" :key="file.filename" class="text-xs font-mono truncate text-muted" :title="file.filename">
+                {{ file.filename }}
+              </div>
+            </div>
           </div>
         </UCard>
       </div>

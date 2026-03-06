@@ -489,6 +489,13 @@ func (d *DownloadDispatcher) CancelSeriesDownloads(ctx context.Context, seriesID
 	return deleted, nil
 }
 
+// DeleteAllFailed removes all failed download queue items.
+func (d *DownloadDispatcher) DeleteAllFailed(ctx context.Context) (int, error) {
+	return d.db.DownloadQueueItem.Delete().
+		Where(downloadqueueitem.StatusEQ(types.DLStatusFailed)).
+		Exec(ctx)
+}
+
 // queueItemToDownloadInfo converts an Ent entity to the API DTO.
 func queueItemToDownloadInfo(item *ent.DownloadQueueItem) types.DownloadInfo {
 	args := item.Args

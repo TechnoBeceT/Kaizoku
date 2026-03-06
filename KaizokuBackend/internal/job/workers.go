@@ -395,7 +395,7 @@ func (d *Deps) enqueueNextFallback(ctx context.Context, args types.DownloadChapt
 			PageCount:         pc,
 			UploadDate:        args.UploadDate,
 			FallbackProviders: remaining,
-			CascadeRetries:    args.CascadeRetries,
+			CascadeRetries:    0,
 		}
 
 		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now()); err != nil {
@@ -788,6 +788,47 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 	return false
 }
 
+// normalizeProviderName strips non-alphanumeric characters and lowercases for fuzzy matching.
+func normalizeProviderName(name string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// parseProviderFromFilename extracts the provider name from a CBZ filename.
+// Expected format: [Provider][lang] Title ChapterNum.cbz
+func parseProviderFromFilename(filename string) string {
+	if idx := strings.Index(filename, "["); idx >= 0 {
+		if end := strings.Index(filename[idx:], "]"); end >= 0 {
+			return filename[idx+1 : idx+end]
+		}
+	}
+	return ""
+}
+
+// parseChapterFromFilename extracts the chapter number from a CBZ filename.
+// Expected format: [Provider][lang] Title ChapterNum.cbz
+func parseChapterFromFilename(filename string) *float64 {
+	name := strings.TrimSuffix(filename, filepath.Ext(filename))
+	name = strings.TrimSpace(name)
+	// Walk backwards to find the trailing number (may include decimal like 221.5)
+	i := len(name) - 1
+	for i >= 0 && (name[i] == '.' || (name[i] >= '0' && name[i] <= '9')) {
+		i--
+	}
+	numStr := strings.TrimRight(name[i+1:], ".")
+	if numStr != "" {
+		if n, err := strconv.ParseFloat(numStr, 64); err == nil {
+			return &n
+		}
+	}
+	return nil
+}
+
 // findChapterInProvider looks up a chapter by number in a provider's chapter list.
 // Returns the provider index, URL, and page count, or (-1, "", 0) if not found.
 func findChapterInProvider(sp *ent.SeriesProvider, chapterNumber *float64) (index int, url string, pageCount int) {
@@ -1088,6 +1129,13 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 		}
 	}
 
+	shouldDownloadMap := make(map[float64]bool)
+	for _, ch := range sp.Chapters {
+		if ch.Number != nil && ch.ShouldDownload && ch.Filename == "" && !ch.IsDeleted && !ch.IsPermanentlyFailed {
+			shouldDownloadMap[*ch.Number] = true
+		}
+	}
+
 	// Build cross-provider chapter availability map.
 	// Track both DOWNLOADED and AVAILABLE chapters from other providers.
 	// This prevents race conditions where multiple providers generate duplicate downloads.
@@ -1164,11 +1212,7 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 			continue
 		}
 		// Respect ContinueAfterChapter for imported series
-		if continueAfter > 0 && num <= continueAfter {
-			continue
-		}
-		// Skip if any provider has permanently failed this chapter
-		if status, ok := otherChapters[num]; ok && status.permanentlyFailed {
+		if continueAfter > 0 && num <= continueAfter && !shouldDownloadMap[num] {
 			continue
 		}
 		// Check cross-provider availability
@@ -1179,7 +1223,7 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 			}
 			// A more-important active provider has this chapter AVAILABLE (even if not yet downloaded) — skip.
 			// This prevents race conditions on initial import where all providers generate downloads simultaneously.
-			if status.bestActiveAvailable >= 0 && status.bestActiveAvailable < sp.Importance {
+			if status.bestActiveAvailable >= 0 && status.bestActiveAvailable <= sp.Importance {
 				continue
 			}
 			// Only disabled/removed providers have it downloaded — skip (preserve existing file)
@@ -3218,12 +3262,18 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 		return result
 	}
 
-	// Build set of ALL tracked filenames across all providers
+	// Build set of ALL tracked filenames and chapter numbers across all providers
 	trackedFiles := make(map[string]bool)
+	trackedChapterNums := make(map[float64]bool)
+	activeProviders := make(map[string]bool)
 	for _, p := range providers {
+		activeProviders[normalizeProviderName(p.Provider)] = true
 		for _, ch := range p.Chapters {
 			if ch.Filename != "" && !ch.IsDeleted {
 				trackedFiles[ch.Filename] = true
+			}
+			if ch.Number != nil && ch.Filename != "" && !ch.IsDeleted {
+				trackedChapterNums[*ch.Number] = true
 			}
 		}
 	}
@@ -3252,14 +3302,13 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					}
 				}
 
-				// Fix DB record: clear filename, mark for re-download (unless permanently failed)
+				// Fix DB record: clear filename, mark for re-download
 				delete(trackedFiles, ch.Filename)
 				ch.Filename = ""
 				ch.DownloadDate = nil
 				ch.IsDeleted = false
-				if !ch.IsPermanentlyFailed {
-					ch.ShouldDownload = true
-				}
+				ch.IsPermanentlyFailed = false
+				ch.ShouldDownload = true
 				result.MissingFiles++
 				result.FixedCount++
 				changed = true
@@ -3285,9 +3334,8 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					ch.Filename = ""
 					ch.DownloadDate = nil
 					ch.IsDeleted = false
-					if !ch.IsPermanentlyFailed {
-						ch.ShouldDownload = true
-					}
+					ch.IsPermanentlyFailed = false
+					ch.ShouldDownload = true
 					result.MissingFiles++
 					result.FixedCount++
 					changed = true
@@ -3333,7 +3381,12 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 				continue
 			}
 			if !trackedFiles[entry.Name()] {
-				result.OrphanFiles = append(result.OrphanFiles, entry.Name())
+				chNum := parseChapterFromFilename(entry.Name())
+				provName := parseProviderFromFilename(entry.Name())
+				isDuplicate := (chNum != nil && trackedChapterNums[*chNum]) || activeProviders[normalizeProviderName(provName)]
+				if !isDuplicate {
+					result.OrphanFiles = append(result.OrphanFiles, entry.Name())
+				}
 			}
 		}
 	}
