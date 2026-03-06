@@ -5,6 +5,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/riverqueue/river"
+	"github.com/riverqueue/river/rivertype"
 )
 
 // Queue names used by River (downloads are handled by custom DownloadDispatcher, not River).
@@ -172,7 +173,31 @@ func (VerifyAllSeriesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
 		Queue: QueueDefault,
 		UniqueOpts: river.UniqueOpts{
-			ByPeriod: 5 * time.Minute,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable,
+				rivertype.JobStateRunning,
+			},
+		},
+	}
+}
+
+// UpgradeAllSourcesArgs represents a job to upgrade chapters to better sources.
+type UpgradeAllSourcesArgs struct{}
+
+func (UpgradeAllSourcesArgs) Kind() string { return "upgrade_all_sources" }
+
+func (UpgradeAllSourcesArgs) InsertOpts() river.InsertOpts {
+	return river.InsertOpts{
+		Queue: QueueDefault,
+		UniqueOpts: river.UniqueOpts{
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable,
+				rivertype.JobStateRunning,
+			},
 		},
 	}
 }

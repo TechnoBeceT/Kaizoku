@@ -56,6 +56,7 @@ func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suw
 	river.AddWorker(workers, &RefreshAllChaptersWorker{Deps: deps})
 	river.AddWorker(workers, &RefreshAllLatestWorker{Deps: deps})
 	river.AddWorker(workers, &VerifyAllSeriesWorker{Deps: deps})
+	river.AddWorker(workers, &UpgradeAllSourcesWorker{Deps: deps})
 
 	// Parse schedule intervals from config
 	extUpdateInterval, err := time.ParseDuration(cfg.Settings.ExtensionsUpdateSchedule)

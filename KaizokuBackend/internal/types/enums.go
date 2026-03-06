@@ -145,6 +145,7 @@ const (
 	JobTypeDailyUpdate                JobType = 9
 	JobTypeVerifyAll                  JobType = 10
 	JobTypeDeepVerify                 JobType = 11
+	JobTypeUpgradeAllSources          JobType = 12
 )
 
 // QueueStatus represents the status of a queued job.

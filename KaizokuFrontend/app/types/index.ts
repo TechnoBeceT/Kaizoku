@@ -243,6 +243,7 @@ export enum JobType {
   DailyUpdate = 9,
   VerifyAll = 10,
   DeepVerify = 11,
+  UpgradeAllSources = 12,
 }
 
 export enum ProgressStatus {
@@ -620,4 +621,19 @@ export interface TimelineBucket {
   failureCount: number
   avgDurationMs: number
   totalEvents: number
+}
+
+export interface JobKindStatus {
+  kind: string
+  running: number
+  available: number
+  scheduled: number
+  pending: number
+  completed: number
+  failed: number
+  total: number
+}
+
+export interface JobsStatusResponse {
+  kinds: JobKindStatus[]
 }

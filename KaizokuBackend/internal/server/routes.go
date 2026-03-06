@@ -27,6 +27,7 @@ func registerRoutes(e *echo.Echo, h *handler.Handler) {
 	serie.GET("/cleanup", h.Series.CleanupSeries)
 	serie.GET("/deep-verify", h.Series.DeepVerify)
 	serie.POST("/verify-all", h.Series.VerifyAll)
+	serie.POST("/upgrade-all-sources", h.Series.UpgradeAllSources)
 	serie.GET("/match/:providerId", h.Series.GetProviderMatch)
 	serie.GET("/source", h.Series.GetSources)
 	serie.GET("/source/icon/:apk", h.Series.GetSourceIcon)
@@ -84,4 +85,8 @@ func registerRoutes(e *echo.Echo, h *handler.Handler) {
 	reporting.GET("/sources", h.Reporting.GetSources)
 	reporting.GET("/source/:sourceId/events", h.Reporting.GetSourceEvents)
 	reporting.GET("/source/:sourceId/timeline", h.Reporting.GetSourceTimeline)
+
+	// Jobs
+	jobs := api.Group("/jobs")
+	jobs.GET("/status", h.Jobs.GetJobStatus)
 }

@@ -94,4 +94,8 @@ export const seriesService = {
   async updateAllSeries(): Promise<void> {
     return apiClient.post<void>('/api/serie/update-all', {})
   },
+
+  async upgradeAllSources(): Promise<void> {
+    return apiClient.post<void>('/api/serie/upgrade-all-sources', {})
+  },
 }

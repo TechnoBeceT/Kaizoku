@@ -423,7 +423,7 @@ func (h *SeriesHandler) VerifyIntegrity(c echo.Context) error {
 		})
 	}
 
-	result := h.jobDeps.VerifySeriesIntegrity(ctx, uid, settings.StorageFolder)
+	result := h.jobDeps.VerifySeriesIntegrity(ctx, uid, settings.StorageFolder, false)
 	return c.JSON(http.StatusOK, result)
 }
 
@@ -453,7 +453,7 @@ func (h *SeriesHandler) CleanupSeries(c echo.Context) error {
 		return c.JSON(http.StatusOK, nil)
 	}
 
-	h.jobDeps.VerifySeriesIntegrity(ctx, uid, settings.StorageFolder)
+	h.jobDeps.VerifySeriesIntegrity(ctx, uid, settings.StorageFolder, false)
 	return c.JSON(http.StatusOK, nil)
 }
 
@@ -737,6 +737,18 @@ func (h *SeriesHandler) VerifyAll(c echo.Context) error {
 	if err != nil {
 		log.Error().Err(err).Msg("failed to enqueue VerifyAllSeries job")
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to enqueue verification job."})
+	}
+	return c.JSON(http.StatusOK, map[string]string{"status": "queued"})
+}
+
+// UpgradeAllSources enqueues a background job to upgrade chapters to better sources.
+// POST /api/serie/upgrade-all-sources
+func (h *SeriesHandler) UpgradeAllSources(c echo.Context) error {
+	ctx := c.Request().Context()
+	_, err := h.river.Insert(ctx, job.UpgradeAllSourcesArgs{}, nil)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to enqueue UpgradeAllSources job")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to enqueue upgrade job."})
 	}
 	return c.JSON(http.StatusOK, map[string]string{"status": "queued"})
 }
@@ -2016,9 +2028,13 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 	if storagePath != "" {
 		trackedFiles := make(map[string]bool)
 		trackedChapters := make(map[float64]bool) // chapters with a downloaded file
-		activeProviders := make(map[string]bool)  // normalized provider names
+		activeProviders := make(map[string]bool)  // normalized provider names (including provider-scanlator combos)
 		for _, p := range providers {
 			activeProviders[normalizeProviderName(p.Provider)] = true
+			// Also register provider-scanlator combo since filenames use "Provider-Scanlator" format
+			if p.Scanlator != "" && p.Scanlator != p.Provider {
+				activeProviders[normalizeProviderName(p.Provider+p.Scanlator)] = true
+			}
 			for _, ch := range p.Chapters {
 				if ch.Filename != "" && !ch.IsDeleted {
 					trackedFiles[ch.Filename] = true

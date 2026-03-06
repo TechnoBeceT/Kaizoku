@@ -155,6 +155,10 @@ export function useSignalRProgress(options: ProgressTrackingOptions) {
     return progressStates.value[jobType]?.percentage ?? 0
   }
 
+  function resetJob(jobType: JobType): void {
+    progressStates.value[jobType] = null
+  }
+
   return {
     progressStates,
     connectionReady,
@@ -162,5 +166,6 @@ export function useSignalRProgress(options: ProgressTrackingOptions) {
     isJobCompleted,
     isJobFailed,
     getJobProgress,
+    resetJob,
   }
 }

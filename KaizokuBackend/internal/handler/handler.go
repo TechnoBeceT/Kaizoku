@@ -19,6 +19,7 @@ type Handler struct {
 	Settings  *SettingsHandler
 	Setup     *SetupHandler
 	Reporting *ReportingHandler
+	Jobs      *JobsHandler
 }
 
 func New(cfg *config.Config, db *ent.Client, sw *suwayomi.Client, jobMgr *job.Manager) *Handler {
@@ -33,6 +34,7 @@ func New(cfg *config.Config, db *ent.Client, sw *suwayomi.Client, jobMgr *job.Ma
 		Settings:  NewSettingsHandler(cfg, db, sw),
 		Setup:     &SetupHandler{config: cfg, db: db, suwayomi: sw, river: rc},
 		Reporting: &ReportingHandler{db: db},
+		Jobs:      &JobsHandler{pool: jobMgr.Pool},
 	}
 }
 

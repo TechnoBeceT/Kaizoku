@@ -683,6 +683,74 @@ func (d *Deps) cleanupInferiorCopies(ctx context.Context, args types.DownloadCha
 	}
 }
 
+// cleanupDuplicateChapters removes chapter files from inferior providers when a better
+// provider has the same chapter downloaded. Called during Verify to clean up old mess.
+func (d *Deps) cleanupDuplicateChapters(ctx context.Context, seriesID uuid.UUID, storagePath string) int {
+	providers, err := d.DB.SeriesProvider.Query().
+		Where(seriesprovider.SeriesIDEQ(seriesID)).
+		All(ctx)
+	if err != nil || len(providers) == 0 {
+		return 0
+	}
+
+	// Build map: chapter number → [{provider importance, provider idx, chapter idx, filename}]
+	type chapterCopy struct {
+		provIdx    int
+		chapIdx    int
+		importance int
+		filename   string
+	}
+	chapterMap := make(map[float64][]chapterCopy)
+	for pi, p := range providers {
+		for ci, ch := range p.Chapters {
+			if ch.Number != nil && ch.Filename != "" && !ch.IsDeleted {
+				chapterMap[*ch.Number] = append(chapterMap[*ch.Number], chapterCopy{
+					provIdx:    pi,
+					chapIdx:    ci,
+					importance: p.Importance,
+					filename:   ch.Filename,
+				})
+			}
+		}
+	}
+
+	removed := 0
+	modifiedProviders := make(map[int]bool)
+	seriesDir := filepath.Join(d.Config.Storage.Folder, storagePath)
+
+	for _, copies := range chapterMap {
+		if len(copies) < 2 {
+			continue
+		}
+		// Sort by importance — keep the best (lowest importance)
+		sort.Slice(copies, func(i, j int) bool {
+			return copies[i].importance < copies[j].importance
+		})
+		// Delete all except the best
+		for _, dup := range copies[1:] {
+			filePath := filepath.Join(seriesDir, dup.filename)
+			if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+				log.Warn().Err(err).Str("file", dup.filename).Msg("verify: failed to delete duplicate chapter")
+				continue
+			}
+			providers[dup.provIdx].Chapters[dup.chapIdx].IsDeleted = true
+			providers[dup.provIdx].Chapters[dup.chapIdx].Filename = ""
+			modifiedProviders[dup.provIdx] = true
+			removed++
+			log.Info().Str("file", dup.filename).Msg("verify: deleted duplicate chapter copy")
+		}
+	}
+
+	// Save modified providers
+	for pi := range modifiedProviders {
+		if _, err := d.DB.SeriesProvider.UpdateOneID(providers[pi].ID).
+			SetChapters(providers[pi].Chapters).Save(ctx); err != nil {
+			log.Warn().Err(err).Str("provider", providers[pi].Provider).Msg("verify: failed to save after dup cleanup")
+		}
+	}
+	return removed
+}
+
 // handleReplacementSuccess is called when a replacement download succeeds.
 // It cleans up ALL inferior copies, not just the specific one being replaced.
 func (d *Deps) handleReplacementSuccess(ctx context.Context, args types.DownloadChapterArgs) {
@@ -1143,7 +1211,6 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 		hasDisabledCopy      bool // A disabled/removed provider has this on disk
 		bestActiveDownloaded int  // Lowest importance of active providers with this chapter downloaded (-1 = none)
 		bestActiveAvailable  int  // Lowest importance of active providers with this chapter available (-1 = none)
-		permanentlyFailed    bool // Any provider has marked this chapter as permanently failed
 	}
 	otherChapters := make(map[float64]*chapterStatus)
 
@@ -1168,11 +1235,6 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 			}
 			num := *ch.Number
 			status := ensureStatus(num)
-
-			// Track permanently failed chapters across providers
-			if ch.IsPermanentlyFailed {
-				status.permanentlyFailed = true
-			}
 
 			// Track downloaded chapters
 			if ch.Filename != "" && !ch.IsDeleted {
@@ -2701,7 +2763,7 @@ func (w *ImportSeriesWorker) createSeriesFromImport(
 
 	// Run mandatory post-import verify to ensure clean state
 	log.Info().Str("series", dbSeries.Title).Msg("running post-import integrity verification")
-	w.Deps.VerifySeriesIntegrity(ctx, dbSeries.ID, storageFolder)
+	w.Deps.VerifySeriesIntegrity(ctx, dbSeries.ID, storageFolder, true)
 
 	// Enqueue GetChapters for non-disabled, non-unknown providers
 	if !disableDownloads {
@@ -3219,7 +3281,8 @@ func buildKaizokuInfo(s *ent.Series, providers []*ent.SeriesProvider) types.Kaiz
 // VerifySeriesIntegrity performs comprehensive integrity verification for a single series.
 // It checks files against DB, fixes DB records for missing/bad files, detects orphans,
 // recalculates ContinueAfterChapter, regenerates kaizoku.json, and enqueues re-downloads.
-func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, storageFolder string) types.SeriesIntegrityResult {
+// When skipEnqueue is true, GetChapters jobs are NOT enqueued (caller handles refresh).
+func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, storageFolder string, skipEnqueue bool) types.SeriesIntegrityResult {
 	result := types.SeriesIntegrityResult{
 		BadFiles:    []types.ArchiveIntegrityResult{},
 		OrphanFiles: []string{},
@@ -3268,6 +3331,9 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 	activeProviders := make(map[string]bool)
 	for _, p := range providers {
 		activeProviders[normalizeProviderName(p.Provider)] = true
+		if p.Scanlator != "" && p.Scanlator != p.Provider {
+			activeProviders[normalizeProviderName(p.Provider+p.Scanlator)] = true
+		}
 		for _, ch := range p.Chapters {
 			if ch.Filename != "" && !ch.IsDeleted {
 				trackedFiles[ch.Filename] = true
@@ -3374,21 +3440,36 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 	entries, err := os.ReadDir(seriesDir)
 	if err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() {
+			if entry.IsDir() || !util.IsArchive(entry.Name()) {
 				continue
 			}
-			if !util.IsArchive(entry.Name()) {
+			if trackedFiles[entry.Name()] {
 				continue
 			}
-			if !trackedFiles[entry.Name()] {
-				chNum := parseChapterFromFilename(entry.Name())
-				provName := parseProviderFromFilename(entry.Name())
-				isDuplicate := (chNum != nil && trackedChapterNums[*chNum]) || activeProviders[normalizeProviderName(provName)]
-				if !isDuplicate {
+			chNum := parseChapterFromFilename(entry.Name())
+			provName := parseProviderFromFilename(entry.Name())
+			isDuplicate := (chNum != nil && trackedChapterNums[*chNum]) || activeProviders[normalizeProviderName(provName)]
+			if isDuplicate {
+				// Auto-delete duplicate orphan
+				filePath := filepath.Join(seriesDir, entry.Name())
+				if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+					log.Warn().Err(err).Str("file", entry.Name()).Msg("verify: failed to delete duplicate orphan")
 					result.OrphanFiles = append(result.OrphanFiles, entry.Name())
+				} else {
+					result.FixedCount++
+					log.Info().Str("file", entry.Name()).Msg("verify: deleted duplicate orphan")
 				}
+			} else {
+				// Untracked orphan — no provider has this chapter
+				result.OrphanFiles = append(result.OrphanFiles, entry.Name())
 			}
 		}
+	}
+
+	// Clean up duplicate chapter copies across providers (keep best priority)
+	dupsRemoved := d.cleanupDuplicateChapters(ctx, seriesID, s.StoragePath)
+	if dupsRemoved > 0 {
+		result.FixedCount += dupsRemoved
 	}
 
 	// Regenerate kaizoku.json from corrected DB state
@@ -3396,16 +3477,24 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 		log.Warn().Err(err).Msg("verify: failed to regenerate kaizoku.json")
 	}
 
-	// Enqueue GetChapters for ALL active providers to trigger re-downloads
-	// and chapter reconciliation (discovers new chapters from source).
+	// Collect only providers that actually had issues (missing/corrupt files)
 	for _, sp := range providers {
-		if sp.IsDisabled || sp.IsUnknown || sp.IsUninstalled {
-			continue
+		if affectedProviderIDs[sp.ID] {
+			result.AffectedProviderIDs = append(result.AffectedProviderIDs, sp.ID.String())
 		}
-		if _, err := d.enqueueGetChapters(ctx, sp.ID); err != nil {
-			log.Warn().Err(err).Str("providerId", sp.ID.String()).Msg("verify: failed to enqueue GetChapters")
-		} else {
-			result.RedownloadQueued++
+	}
+
+	// When called standalone (not from VerifyAll), enqueue GetChapters via River
+	if !skipEnqueue {
+		for _, sp := range providers {
+			if sp.IsDisabled || sp.IsUnknown || sp.IsUninstalled {
+				continue
+			}
+			if _, err := d.enqueueGetChapters(ctx, sp.ID); err != nil {
+				log.Warn().Err(err).Str("providerId", sp.ID.String()).Msg("verify: failed to enqueue GetChapters")
+			} else {
+				result.RedownloadQueued++
+			}
 		}
 	}
 
@@ -3418,7 +3507,19 @@ func (d *Deps) enqueueGetChapters(ctx context.Context, providerID uuid.UUID) (bo
 	if d.RiverClient == nil {
 		return false, fmt.Errorf("river client not available")
 	}
-	_, err := d.RiverClient.Insert(ctx, GetChaptersArgs{ProviderID: providerID}, nil)
+	// Include all required states plus completed/cancelled/discarded so that
+	// finished jobs don't block new inserts from verify-triggered refreshes.
+	_, err := d.RiverClient.Insert(ctx, GetChaptersArgs{ProviderID: providerID}, &river.InsertOpts{
+		UniqueOpts: river.UniqueOpts{
+			ByArgs: true,
+			ByState: []rivertype.JobState{
+				rivertype.JobStatePending,
+				rivertype.JobStateScheduled,
+				rivertype.JobStateAvailable,
+				rivertype.JobStateRunning,
+			},
+		},
+	})
 	if err != nil {
 		return false, err
 	}
@@ -3463,25 +3564,227 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 	totalOrphans := 0
 	totalFixed := 0
 
+	// Phase 1: Verify all series (skip auto-enqueue, we handle refresh below)
+	type providerRefresh struct {
+		providerID uuid.UUID
+		seriesTitle string
+	}
+	type seriesOrphanInfo struct {
+		SeriesID string   `json:"seriesId"`
+		Title    string   `json:"title"`
+		Orphans  []string `json:"orphans"`
+	}
+	var needsRefresh []providerRefresh
+	var seriesWithOrphans []seriesOrphanInfo
+
 	for i, s := range allSeries {
-		pct := float64(i+1) / float64(total) * 100
+		pct := float64(i+1) / float64(total) * 50 // Phase 1 is 0-50%
 		w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
 			int(types.ProgressStatusRunning), pct,
 			fmt.Sprintf("Verifying %s (%d/%d)", s.Title, i+1, total), nil)
 
-		result := w.Deps.VerifySeriesIntegrity(ctx, s.ID, storageFolder)
+		result := w.Deps.VerifySeriesIntegrity(ctx, s.ID, storageFolder, true)
 		totalBadFiles += len(result.BadFiles)
 		totalMissing += result.MissingFiles
 		totalOrphans += len(result.OrphanFiles)
 		totalFixed += result.FixedCount
+
+		if len(result.OrphanFiles) > 0 {
+			seriesWithOrphans = append(seriesWithOrphans, seriesOrphanInfo{
+				SeriesID: s.ID.String(),
+				Title:    s.Title,
+				Orphans:  result.OrphanFiles,
+			})
+		}
+
+		for _, pid := range result.AffectedProviderIDs {
+			uid, err := uuid.Parse(pid)
+			if err == nil {
+				needsRefresh = append(needsRefresh, providerRefresh{providerID: uid, seriesTitle: s.Title})
+			}
+		}
 	}
 
-	msg := fmt.Sprintf("Verified %d series: %d bad files, %d missing, %d orphans, %d fixed",
-		total, totalBadFiles, totalMissing, totalOrphans, totalFixed)
+	// Phase 2: Enqueue chapter refresh for affected providers
+	refreshQueued := 0
+	if len(needsRefresh) > 0 {
+		refreshTotal := len(needsRefresh)
+		for i, pr := range needsRefresh {
+			pct := 50 + float64(i+1)/float64(refreshTotal)*50 // Phase 2 is 50-100%
+			w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
+				int(types.ProgressStatusRunning), pct,
+				fmt.Sprintf("Scheduling chapter refresh for %s (%d/%d)", pr.seriesTitle, i+1, refreshTotal), nil)
+
+			if _, err := w.Deps.enqueueGetChapters(ctx, pr.providerID); err != nil {
+				log.Warn().Err(err).Str("providerId", pr.providerID.String()).Msg("verify-all: failed to enqueue GetChapters")
+			} else {
+				refreshQueued++
+			}
+		}
+	}
+
+	resultParam := map[string]interface{}{
+		"totalSeries":      total,
+		"badFiles":         totalBadFiles,
+		"missingFiles":     totalMissing,
+		"orphanFiles":      totalOrphans,
+		"fixedCount":       totalFixed,
+		"refreshQueued":    refreshQueued,
+		"seriesWithOrphans": seriesWithOrphans,
+	}
+
+	msg := fmt.Sprintf("Verified %d series: %d bad files, %d missing, %d orphans, %d fixed, %d refreshed",
+		total, totalBadFiles, totalMissing, totalOrphans, totalFixed, refreshQueued)
 	w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
-		int(types.ProgressStatusCompleted), 100, msg, nil)
+		int(types.ProgressStatusCompleted), 100, msg, resultParam)
 
 	return nil
+}
+
+// ============================================================
+// UpgradeAllSourcesWorker
+// ============================================================
+
+type UpgradeAllSourcesWorker struct {
+	river.WorkerDefaults[UpgradeAllSourcesArgs]
+	Deps *Deps
+}
+
+func (w *UpgradeAllSourcesWorker) Work(ctx context.Context, j *river.Job[UpgradeAllSourcesArgs]) error {
+	jobID := fmt.Sprintf("upgrade-all-%d", j.ID)
+	log.Info().Msg("upgrade-all-sources: starting")
+
+	allSeries, err := w.Deps.DB.Series.Query().All(ctx)
+	if err != nil {
+		return fmt.Errorf("query series: %w", err)
+	}
+
+	total := len(allSeries)
+	totalUpgraded := 0
+	totalSkipped := 0
+
+	for i, s := range allSeries {
+		pct := float64(i+1) / float64(total) * 100
+		w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeUpgradeAllSources),
+			int(types.ProgressStatusRunning), pct,
+			fmt.Sprintf("Checking %s (%d/%d)", s.Title, i+1, total), nil)
+
+		queued := w.upgradeSeriesSources(ctx, s)
+		totalUpgraded += queued
+		if queued == 0 {
+			totalSkipped++
+		}
+	}
+
+	msg := fmt.Sprintf("Checked %d series: %d chapters queued for upgrade, %d already optimal",
+		total, totalUpgraded, totalSkipped)
+	w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeUpgradeAllSources),
+		int(types.ProgressStatusCompleted), 100, msg, map[string]interface{}{
+			"totalSeries":    total,
+			"totalUpgraded":  totalUpgraded,
+			"totalSkipped":   totalSkipped,
+		})
+
+	log.Info().Int("upgraded", totalUpgraded).Int("skipped", totalSkipped).Msg("upgrade-all-sources: done")
+	return nil
+}
+
+// upgradeSeriesSources checks a single series for chapters that could be downloaded
+// from a better (lower importance) source. Returns the number of downloads queued.
+func (w *UpgradeAllSourcesWorker) upgradeSeriesSources(ctx context.Context, s *ent.Series) int {
+	providers, err := w.Deps.DB.SeriesProvider.Query().
+		Where(seriesprovider.SeriesIDEQ(s.ID)).
+		Order(seriesprovider.ByImportance()).
+		All(ctx)
+	if err != nil || len(providers) < 2 {
+		return 0
+	}
+
+	// Build map: chapter number → best available importance (lowest) that has the chapter
+	// Only consider active providers
+	type availableChapter struct {
+		provider *ent.SeriesProvider
+		chapter  *types.Chapter
+	}
+	bestAvailable := make(map[float64]availableChapter) // chNum → best provider that has it available
+	for _, p := range providers {
+		if p.IsDisabled || p.IsUninstalled || p.IsUnknown {
+			continue
+		}
+		for i := range p.Chapters {
+			ch := &p.Chapters[i]
+			if ch.Number == nil || ch.IsDeleted {
+				continue
+			}
+			num := *ch.Number
+			// Track the best (lowest importance) provider that has this chapter
+			// Skip if the provider permanently failed this chapter (exhausted retries)
+			if ch.IsPermanentlyFailed {
+				continue
+			}
+			if _, exists := bestAvailable[num]; !exists {
+				bestAvailable[num] = availableChapter{provider: p, chapter: ch}
+			}
+			// Since providers are sorted by importance, the first one we see is the best
+		}
+	}
+
+	// Find chapters downloaded by non-best providers
+	queued := 0
+	baseTime := time.Now().UTC()
+	for _, p := range providers {
+		if p.IsDisabled || p.IsUninstalled || p.IsUnknown {
+			continue
+		}
+		for _, ch := range p.Chapters {
+			if ch.Number == nil || ch.Filename == "" || ch.IsDeleted {
+				continue
+			}
+			num := *ch.Number
+
+			best, exists := bestAvailable[num]
+			if !exists {
+				continue
+			}
+			// If this provider IS the best, skip
+			if best.provider.ID == p.ID {
+				continue
+			}
+			// If the best provider already has it downloaded, skip (cleanup handles the rest)
+			if best.chapter.Filename != "" && !best.chapter.IsDeleted {
+				continue
+			}
+
+			// Queue download from best provider to replace this inferior copy
+			args := types.DownloadChapterArgs{
+				SeriesID:            s.ID,
+				ProviderID:          best.provider.ID,
+				SuwayomiID:          best.provider.SuwayomiID,
+				ChapterIndex:        best.chapter.ProviderIndex,
+				ChapterNumber:       best.chapter.Number,
+				ChapterName:         best.chapter.Name,
+				ProviderName:        best.provider.Provider,
+				Scanlator:           best.provider.Scanlator,
+				Language:            best.provider.Language,
+				Title:               s.Title,
+				StoragePath:         s.StoragePath,
+				ThumbnailURL:        s.ThumbnailURL,
+				URL:                 best.chapter.URL,
+				IsReplacement:       true,
+				ReplacingProviderID: p.ID,
+				ReplacingFilename:   ch.Filename,
+			}
+			if err := w.Deps.DownloadQueue.Enqueue(ctx, args, baseTime); err != nil {
+				log.Warn().Err(err).
+					Str("series", s.Title).
+					Float64("chapter", num).
+					Msg("upgrade: failed to enqueue replacement")
+				continue
+			}
+			queued++
+		}
+	}
+	return queued
 }
 
 // buildChapterRanges creates StartStop ranges from a list of downloaded chapters.

@@ -186,3 +186,9 @@ export function useUpdateAllSeries() {
     },
   })
 }
+
+export function useUpgradeAllSources() {
+  return useMutation({
+    mutationFn: () => seriesService.upgradeAllSources(),
+  })
+}

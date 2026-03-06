@@ -342,6 +342,7 @@ type SeriesIntegrityResult struct {
 	OrphanFiles      []string                 `json:"orphanFiles"`      // On disk but not in DB
 	FixedCount       int                      `json:"fixedCount"`       // DB records corrected
 	RedownloadQueued int                      `json:"redownloadQueued"` // Providers queued for re-download
+	AffectedProviderIDs []string              `json:"-"`                // Provider IDs needing chapter refresh (internal use)
 }
 
 // ArchiveIntegrityResult describes the integrity status of a single archive.
