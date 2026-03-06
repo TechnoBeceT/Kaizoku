@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 	"github.com/technobecet/kaizoku-go/internal/ent"
@@ -494,6 +495,21 @@ func (d *DownloadDispatcher) DeleteAllFailed(ctx context.Context) (int, error) {
 	return d.db.DownloadQueueItem.Delete().
 		Where(downloadqueueitem.StatusEQ(types.DLStatusFailed)).
 		Exec(ctx)
+}
+
+// CancelWaitingReplacements removes all waiting/scheduled download queue items
+// that are replacement downloads (isReplacement=true in args JSONB).
+func (d *DownloadDispatcher) CancelWaitingReplacements(ctx context.Context) (int, error) {
+	// Use raw SQL since Ent doesn't support JSONB field queries
+	result, err := d.db.DownloadQueueItem.Delete().
+		Where(
+			downloadqueueitem.StatusEQ(types.DLStatusWaiting),
+			func(s *sql.Selector) {
+				s.Where(sql.ExprP("(args->>'isReplacement')::boolean = true"))
+			},
+		).
+		Exec(ctx)
+	return result, err
 }
 
 // queueItemToDownloadInfo converts an Ent entity to the API DTO.

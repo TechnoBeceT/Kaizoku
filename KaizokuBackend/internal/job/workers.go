@@ -3328,6 +3328,7 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 	// Build set of ALL tracked filenames and chapter numbers across all providers
 	trackedFiles := make(map[string]bool)
 	trackedChapterNums := make(map[float64]bool)
+	availableChapterNums := make(map[float64]bool) // all chapter numbers from active providers (even if not downloaded)
 	activeProviders := make(map[string]bool)
 	for _, p := range providers {
 		activeProviders[normalizeProviderName(p.Provider)] = true
@@ -3335,11 +3336,14 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 			activeProviders[normalizeProviderName(p.Provider+p.Scanlator)] = true
 		}
 		for _, ch := range p.Chapters {
+			if ch.Number != nil {
+				availableChapterNums[*ch.Number] = true
+			}
 			if ch.Filename != "" && !ch.IsDeleted {
 				trackedFiles[ch.Filename] = true
-			}
-			if ch.Number != nil && ch.Filename != "" && !ch.IsDeleted {
-				trackedChapterNums[*ch.Number] = true
+				if ch.Number != nil {
+					trackedChapterNums[*ch.Number] = true
+				}
 			}
 		}
 	}
@@ -3448,7 +3452,7 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 			}
 			chNum := parseChapterFromFilename(entry.Name())
 			provName := parseProviderFromFilename(entry.Name())
-			isDuplicate := (chNum != nil && trackedChapterNums[*chNum]) || activeProviders[normalizeProviderName(provName)]
+			isDuplicate := (chNum != nil && availableChapterNums[*chNum]) || activeProviders[normalizeProviderName(provName)]
 			if isDuplicate {
 				// Auto-delete duplicate orphan
 				filePath := filepath.Join(seriesDir, entry.Name())
@@ -3458,6 +3462,13 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 				} else {
 					result.FixedCount++
 					log.Info().Str("file", entry.Name()).Msg("verify: deleted duplicate orphan")
+					// If chapter is available but not downloaded from any active provider, mark best provider for refresh
+					if chNum != nil && !trackedChapterNums[*chNum] {
+						for _, p := range providers {
+							affectedProviderIDs[p.ID] = true
+							break // mark only the best (first = lowest importance) provider
+						}
+					}
 				}
 			} else {
 				// Untracked orphan — no provider has this chapter
@@ -3691,6 +3702,15 @@ type UpgradeAllSourcesWorker struct {
 func (w *UpgradeAllSourcesWorker) Work(ctx context.Context, j *river.Job[UpgradeAllSourcesArgs]) error {
 	jobID := fmt.Sprintf("upgrade-all-%d", j.ID)
 	log.Info().Msg("upgrade-all-sources: starting")
+
+	// Cancel any pending replacement downloads from a previous run
+	// so we don't get duplicates or downloads from wrong sources
+	cancelled, err := w.Deps.DownloadQueue.CancelWaitingReplacements(ctx)
+	if err != nil {
+		log.Warn().Err(err).Msg("upgrade-all-sources: failed to cancel previous replacements")
+	} else if cancelled > 0 {
+		log.Info().Int("count", cancelled).Msg("upgrade-all-sources: cancelled previous replacement downloads")
+	}
 
 	allSeries, err := w.Deps.DB.Series.Query().All(ctx)
 	if err != nil {

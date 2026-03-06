@@ -2028,6 +2028,7 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 	if storagePath != "" {
 		trackedFiles := make(map[string]bool)
 		trackedChapters := make(map[float64]bool) // chapters with a downloaded file
+		availableChapters := make(map[float64]bool) // chapters available from any active provider (even if not downloaded)
 		activeProviders := make(map[string]bool)  // normalized provider names (including provider-scanlator combos)
 		for _, p := range providers {
 			activeProviders[normalizeProviderName(p.Provider)] = true
@@ -2036,6 +2037,9 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 				activeProviders[normalizeProviderName(p.Provider+p.Scanlator)] = true
 			}
 			for _, ch := range p.Chapters {
+				if ch.Number != nil {
+					availableChapters[*ch.Number] = true
+				}
 				if ch.Filename != "" && !ch.IsDeleted {
 					trackedFiles[ch.Filename] = true
 					if ch.Number != nil {
@@ -2054,8 +2058,8 @@ func (h *SeriesHandler) toSeriesExtendedInfo(c echo.Context, s *ent.Series, prov
 				}
 				orphan := types.OrphanFileInfo{Filename: entry.Name()}
 				orphan.Provider, orphan.Language, orphan.ChapterNumber = parseOrphanFilename(entry.Name())
-				// Duplicate if: chapter exists from any tracked provider, OR file belongs to an active provider
-				if (orphan.ChapterNumber != nil && trackedChapters[*orphan.ChapterNumber]) || activeProviders[normalizeProviderName(orphan.Provider)] {
+				// Duplicate if: chapter available from any active provider (even if not yet downloaded), OR file belongs to an active provider
+				if (orphan.ChapterNumber != nil && availableChapters[*orphan.ChapterNumber]) || activeProviders[normalizeProviderName(orphan.Provider)] {
 					orphan.IsDuplicate = true
 				}
 				info.OrphanFiles = append(info.OrphanFiles, orphan)
