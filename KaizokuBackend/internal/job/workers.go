@@ -235,10 +235,10 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 	}
 
 	// Guard against truncated downloads: if Suwayomi reported a page count and we got
-	// significantly fewer pages (< 80%), treat as failure. A 404 mid-chapter from a flaky
-	// source would otherwise silently create a CBZ with missing pages.
-	if pageCountHint > 1 && float64(len(pages)) < float64(pageCountHint)*0.8 {
-		truncErr := fmt.Errorf("truncated download: got %d pages but expected ~%d for %s Ch.%s", len(pages), pageCountHint, args.Title, chapStr)
+	// fewer pages, treat as failure. Even 1 missing page means the source is broken
+	// for this chapter — cascade to the next source.
+	if pageCountHint > 1 && len(pages) < pageCountHint {
+		truncErr := fmt.Errorf("truncated download: got %d pages but expected %d for %s Ch.%s", len(pages), pageCountHint, args.Title, chapStr)
 		dlMeta["pagesDownloaded"] = strconv.Itoa(len(pages))
 		dlMeta["pagesExpected"] = strconv.Itoa(pageCountHint)
 		util.LogSourceEvent(d.DB, dlSourceID, args.ProviderName, args.Language,
@@ -3433,18 +3433,30 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 			} else {
 				// Archive is structurally valid — check for truncated files.
 				localPages := util.CountCBZPages(archivePath)
+				isTruncated := false
+
+				// Exact check: if PageCount was synced from Suwayomi, even 1 missing page is a failure
+				if ch.PageCount != nil && *ch.PageCount > 0 && localPages > 0 && localPages < *ch.PageCount {
+					isTruncated = true
+				}
+
+				// Statistical fallback: if PageCount is missing/unreliable, compare against
+				// provider median to catch grossly truncated downloads (only whole-number chapters)
+				if !isTruncated && localPages > 0 {
+					isWholeChapter := ch.Number != nil && *ch.Number == float64(int(*ch.Number))
+					if isWholeChapter && medianPC > 0 && float64(localPages) < float64(medianPC)*0.5 {
+						isTruncated = true
+					}
+				}
+
 				expected := 0
-				if ch.PageCount != nil && *ch.PageCount > 0 {
+				if ch.PageCount != nil {
 					expected = *ch.PageCount
 				}
-				// Also use median as expected if it's higher — catches cases where
-				// a truncated download overwrote PageCount with its own wrong value.
-				// Only for whole-number chapters (skip .5 specials).
-				isWholeChapter := ch.Number != nil && *ch.Number == float64(int(*ch.Number))
-				if isWholeChapter && medianPC > expected {
+				if medianPC > expected {
 					expected = medianPC
 				}
-				if expected > 0 && localPages > 0 && float64(localPages) < float64(expected)*0.5 {
+				if isTruncated {
 					log.Warn().
 						Str("file", ch.Filename).
 						Int("localPages", localPages).
