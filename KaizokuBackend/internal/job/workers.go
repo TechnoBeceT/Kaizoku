@@ -3574,8 +3574,14 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 		Title    string   `json:"title"`
 		Orphans  []string `json:"orphans"`
 	}
+	type duplicateImportanceInfo struct {
+		SeriesID  string   `json:"seriesId"`
+		Title     string   `json:"title"`
+		Providers []string `json:"providers"` // provider names sharing the same importance
+	}
 	var needsRefresh []providerRefresh
 	var seriesWithOrphans []seriesOrphanInfo
+	var seriesWithDupImportance []duplicateImportanceInfo
 
 	for i, s := range allSeries {
 		pct := float64(i+1) / float64(total) * 50 // Phase 1 is 0-50%
@@ -3603,6 +3609,34 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 				needsRefresh = append(needsRefresh, providerRefresh{providerID: uid, seriesTitle: s.Title})
 			}
 		}
+
+		// Check for duplicate importance values
+		providers, err := w.Deps.DB.SeriesProvider.Query().
+			Where(seriesprovider.SeriesIDEQ(s.ID),
+				seriesprovider.IsDisabledEQ(false),
+				seriesprovider.IsUnknownEQ(false),
+				seriesprovider.IsUninstalledEQ(false)).
+			Order(seriesprovider.ByImportance()).
+			All(ctx)
+		if err == nil && len(providers) > 1 {
+			importanceMap := make(map[int][]string)
+			for _, p := range providers {
+				importanceMap[p.Importance] = append(importanceMap[p.Importance], p.Provider+" ("+p.Scanlator+")")
+			}
+			var dupes []string
+			for _, names := range importanceMap {
+				if len(names) > 1 {
+					dupes = append(dupes, names...)
+				}
+			}
+			if len(dupes) > 0 {
+				seriesWithDupImportance = append(seriesWithDupImportance, duplicateImportanceInfo{
+					SeriesID:  s.ID.String(),
+					Title:     s.Title,
+					Providers: dupes,
+				})
+			}
+		}
 	}
 
 	// Phase 2: Enqueue chapter refresh for affected providers
@@ -3623,18 +3657,22 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 		}
 	}
 
-	resultParam := map[string]interface{}{
-		"totalSeries":      total,
-		"badFiles":         totalBadFiles,
-		"missingFiles":     totalMissing,
-		"orphanFiles":      totalOrphans,
-		"fixedCount":       totalFixed,
-		"refreshQueued":    refreshQueued,
-		"seriesWithOrphans": seriesWithOrphans,
+	resultParam := map[string]any{
+		"totalSeries":            total,
+		"badFiles":               totalBadFiles,
+		"missingFiles":           totalMissing,
+		"orphanFiles":            totalOrphans,
+		"fixedCount":             totalFixed,
+		"refreshQueued":          refreshQueued,
+		"seriesWithOrphans":      seriesWithOrphans,
+		"seriesWithDupImportance": seriesWithDupImportance,
 	}
 
 	msg := fmt.Sprintf("Verified %d series: %d bad files, %d missing, %d orphans, %d fixed, %d refreshed",
 		total, totalBadFiles, totalMissing, totalOrphans, totalFixed, refreshQueued)
+	if len(seriesWithDupImportance) > 0 {
+		msg += fmt.Sprintf(", %d series with duplicate priorities", len(seriesWithDupImportance))
+	}
 	w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
 		int(types.ProgressStatusCompleted), 100, msg, resultParam)
 
@@ -3679,7 +3717,7 @@ func (w *UpgradeAllSourcesWorker) Work(ctx context.Context, j *river.Job[Upgrade
 	msg := fmt.Sprintf("Checked %d series: %d chapters queued for upgrade, %d already optimal",
 		total, totalUpgraded, totalSkipped)
 	w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeUpgradeAllSources),
-		int(types.ProgressStatusCompleted), 100, msg, map[string]interface{}{
+		int(types.ProgressStatusCompleted), 100, msg, map[string]any{
 			"totalSeries":    total,
 			"totalUpgraded":  totalUpgraded,
 			"totalSkipped":   totalSkipped,
@@ -3717,21 +3755,22 @@ func (w *UpgradeAllSourcesWorker) upgradeSeriesSources(ctx context.Context, s *e
 				continue
 			}
 			num := *ch.Number
-			// Track the best (lowest importance) provider that has this chapter
-			// Skip if the provider permanently failed this chapter (exhausted retries)
-			if ch.IsPermanentlyFailed {
-				continue
-			}
-			if _, exists := bestAvailable[num]; !exists {
+			// Track the best (lowest importance) provider that has this chapter.
+			// Don't skip permanently failed — this is an explicit user action, give all sources a fresh chance.
+			// On same importance tie: prefer the provider that already has the chapter downloaded.
+			if existing, exists := bestAvailable[num]; !exists {
+				bestAvailable[num] = availableChapter{provider: p, chapter: ch}
+			} else if p.Importance == existing.provider.Importance &&
+				ch.Filename != "" && existing.chapter.Filename == "" {
 				bestAvailable[num] = availableChapter{provider: p, chapter: ch}
 			}
-			// Since providers are sorted by importance, the first one we see is the best
 		}
 	}
 
 	// Find chapters downloaded by non-best providers
 	queued := 0
 	baseTime := time.Now().UTC()
+	modifiedProviders := make(map[uuid.UUID]bool)
 	for _, p := range providers {
 		if p.IsDisabled || p.IsUninstalled || p.IsUnknown {
 			continue
@@ -3753,6 +3792,13 @@ func (w *UpgradeAllSourcesWorker) upgradeSeriesSources(ctx context.Context, s *e
 			// If the best provider already has it downloaded, skip (cleanup handles the rest)
 			if best.chapter.Filename != "" && !best.chapter.IsDeleted {
 				continue
+			}
+
+			// Reset permanently failed flag on best source's chapter so it gets a fresh chance
+			if best.chapter.IsPermanentlyFailed {
+				best.chapter.IsPermanentlyFailed = false
+				best.chapter.ShouldDownload = true
+				modifiedProviders[best.provider.ID] = true
 			}
 
 			// Queue download from best provider to replace this inferior copy
@@ -3784,6 +3830,17 @@ func (w *UpgradeAllSourcesWorker) upgradeSeriesSources(ctx context.Context, s *e
 			queued++
 		}
 	}
+
+	// Save providers where we reset permanently failed flags
+	for _, p := range providers {
+		if modifiedProviders[p.ID] {
+			if _, err := w.Deps.DB.SeriesProvider.UpdateOneID(p.ID).
+				SetChapters(p.Chapters).Save(ctx); err != nil {
+				log.Warn().Err(err).Str("provider", p.Provider).Msg("upgrade: failed to save provider after reset")
+			}
+		}
+	}
+
 	return queued
 }
 

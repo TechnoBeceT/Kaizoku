@@ -76,6 +76,11 @@ interface SeriesOrphanInfo {
   title: string
   orphans: string[]
 }
+interface DuplicateImportanceInfo {
+  seriesId: string
+  title: string
+  providers: string[]
+}
 interface VerifyResult {
   totalSeries: number
   badFiles: number
@@ -84,6 +89,7 @@ interface VerifyResult {
   fixedCount: number
   refreshQueued: number
   seriesWithOrphans: SeriesOrphanInfo[]
+  seriesWithDupImportance: DuplicateImportanceInfo[]
 }
 const verifyResult = computed<VerifyResult | null>(() => {
   const param = verifyProgress.value?.parameter as VerifyResult | undefined
@@ -106,6 +112,7 @@ const upgradeResult = computed<UpgradeResult | null>(() => {
 })
 
 const showOrphanDetails = ref(false)
+const showDupImportanceDetails = ref(false)
 
 async function handleUpgradeAll() {
   try {
@@ -132,6 +139,7 @@ async function handleVerifyAll() {
     resetJob(JobType.VerifyAll)
     isVerifyAllRunning.value = true
     showOrphanDetails.value = false
+    showDupImportanceDetails.value = false
     await verifyAllMutation.mutateAsync()
   } catch {
     isVerifyAllRunning.value = false
@@ -343,6 +351,38 @@ async function handleVerifyAll() {
               <div class="text-xs text-muted pl-2">
                 <div v-for="file in s.orphans.slice(0, 5)" :key="file">{{ file }}</div>
                 <div v-if="s.orphans.length > 5" class="italic">...and {{ s.orphans.length - 5 }} more</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Duplicate importance warnings -->
+        <div v-if="verifyResult?.seriesWithDupImportance?.length" class="space-y-2">
+          <UButton
+            size="xs"
+            variant="outline"
+            color="warning"
+            :icon="showDupImportanceDetails ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+            :label="`${verifyResult.seriesWithDupImportance.length} series with duplicate priorities`"
+            @click="showDupImportanceDetails = !showDupImportanceDetails"
+          />
+          <p class="text-xs text-muted">
+            These series have multiple sources sharing the same priority value. This can cause unpredictable source selection. Fix by reordering sources on each series page.
+          </p>
+          <div v-if="showDupImportanceDetails" class="space-y-2 max-h-64 overflow-y-auto">
+            <div
+              v-for="s in verifyResult.seriesWithDupImportance"
+              :key="s.seriesId"
+              class="bg-default rounded-lg p-3 space-y-1"
+            >
+              <NuxtLink
+                :to="`/library/series?id=${s.seriesId}`"
+                class="font-medium text-sm text-primary hover:underline"
+              >
+                {{ s.title }}
+              </NuxtLink>
+              <div class="text-xs text-muted pl-2">
+                <div v-for="provider in s.providers" :key="provider">{{ provider }}</div>
               </div>
             </div>
           </div>
