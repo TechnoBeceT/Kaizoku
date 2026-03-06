@@ -57,6 +57,8 @@ const (
 	FieldIsUninstalled = "is_uninstalled"
 	// FieldStatus holds the string denoting the status field in the database.
 	FieldStatus = "status"
+	// FieldPageCountSynced holds the string denoting the page_count_synced field in the database.
+	FieldPageCountSynced = "page_count_synced"
 	// FieldChapters holds the string denoting the chapters field in the database.
 	FieldChapters = "chapters"
 	// EdgeSeries holds the string denoting the series edge name in mutations.
@@ -97,6 +99,7 @@ var Columns = []string{
 	FieldIsDisabled,
 	FieldIsUninstalled,
 	FieldStatus,
+	FieldPageCountSynced,
 	FieldChapters,
 }
 
@@ -133,6 +136,8 @@ var (
 	DefaultIsUninstalled bool
 	// DefaultStatus holds the default value on creation for the "status" field.
 	DefaultStatus string
+	// DefaultPageCountSynced holds the default value on creation for the "page_count_synced" field.
+	DefaultPageCountSynced bool
 	// DefaultID holds the default value on creation for the "id" field.
 	DefaultID func() uuid.UUID
 )
@@ -248,6 +253,11 @@ func ByIsUninstalled(opts ...sql.OrderTermOption) OrderOption {
 // ByStatus orders the results by the status field.
 func ByStatus(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStatus, opts...).ToFunc()
+}
+
+// ByPageCountSynced orders the results by the page_count_synced field.
+func ByPageCountSynced(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPageCountSynced, opts...).ToFunc()
 }
 
 // BySeriesField orders the results by series field.

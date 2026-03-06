@@ -161,6 +161,11 @@ func Status(v string) predicate.SeriesProvider {
 	return predicate.SeriesProvider(sql.FieldEQ(FieldStatus, v))
 }
 
+// PageCountSynced applies equality check predicate on the "page_count_synced" field. It's identical to PageCountSyncedEQ.
+func PageCountSynced(v bool) predicate.SeriesProvider {
+	return predicate.SeriesProvider(sql.FieldEQ(FieldPageCountSynced, v))
+}
+
 // SeriesIDEQ applies the EQ predicate on the "series_id" field.
 func SeriesIDEQ(v uuid.UUID) predicate.SeriesProvider {
 	return predicate.SeriesProvider(sql.FieldEQ(FieldSeriesID, v))
@@ -1169,6 +1174,16 @@ func StatusEqualFold(v string) predicate.SeriesProvider {
 // StatusContainsFold applies the ContainsFold predicate on the "status" field.
 func StatusContainsFold(v string) predicate.SeriesProvider {
 	return predicate.SeriesProvider(sql.FieldContainsFold(FieldStatus, v))
+}
+
+// PageCountSyncedEQ applies the EQ predicate on the "page_count_synced" field.
+func PageCountSyncedEQ(v bool) predicate.SeriesProvider {
+	return predicate.SeriesProvider(sql.FieldEQ(FieldPageCountSynced, v))
+}
+
+// PageCountSyncedNEQ applies the NEQ predicate on the "page_count_synced" field.
+func PageCountSyncedNEQ(v bool) predicate.SeriesProvider {
+	return predicate.SeriesProvider(sql.FieldNEQ(FieldPageCountSynced, v))
 }
 
 // ChaptersIsNil applies the IsNil predicate on the "chapters" field.

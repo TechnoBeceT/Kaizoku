@@ -65,6 +65,8 @@ type SeriesProvider struct {
 	IsUninstalled bool `json:"is_uninstalled,omitempty"`
 	// Status holds the value of the "status" field.
 	Status string `json:"status,omitempty"`
+	// PageCountSynced holds the value of the "page_count_synced" field.
+	PageCountSynced bool `json:"page_count_synced,omitempty"`
 	// Chapters holds the value of the "chapters" field.
 	Chapters []types.Chapter `json:"chapters,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
@@ -100,7 +102,7 @@ func (*SeriesProvider) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case seriesprovider.FieldGenre, seriesprovider.FieldChapters:
 			values[i] = new([]byte)
-		case seriesprovider.FieldIsTitle, seriesprovider.FieldIsCover, seriesprovider.FieldIsUnknown, seriesprovider.FieldIsDisabled, seriesprovider.FieldIsUninstalled:
+		case seriesprovider.FieldIsTitle, seriesprovider.FieldIsCover, seriesprovider.FieldIsUnknown, seriesprovider.FieldIsDisabled, seriesprovider.FieldIsUninstalled, seriesprovider.FieldPageCountSynced:
 			values[i] = new(sql.NullBool)
 		case seriesprovider.FieldContinueAfterChapter:
 			values[i] = new(sql.NullFloat64)
@@ -275,6 +277,12 @@ func (_m *SeriesProvider) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Status = value.String
 			}
+		case seriesprovider.FieldPageCountSynced:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field page_count_synced", values[i])
+			} else if value.Valid {
+				_m.PageCountSynced = value.Bool
+			}
 		case seriesprovider.FieldChapters:
 			if value, ok := values[i].(*[]byte); !ok {
 				return fmt.Errorf("unexpected type %T for field chapters", values[i])
@@ -405,6 +413,9 @@ func (_m *SeriesProvider) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("status=")
 	builder.WriteString(_m.Status)
+	builder.WriteString(", ")
+	builder.WriteString("page_count_synced=")
+	builder.WriteString(fmt.Sprintf("%v", _m.PageCountSynced))
 	builder.WriteString(", ")
 	builder.WriteString("chapters=")
 	builder.WriteString(fmt.Sprintf("%v", _m.Chapters))

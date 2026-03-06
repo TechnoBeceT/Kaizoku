@@ -187,6 +187,10 @@ func init() {
 	seriesproviderDescStatus := seriesproviderFields[22].Descriptor()
 	// seriesprovider.DefaultStatus holds the default value on creation for the status field.
 	seriesprovider.DefaultStatus = seriesproviderDescStatus.Default.(string)
+	// seriesproviderDescPageCountSynced is the schema descriptor for page_count_synced field.
+	seriesproviderDescPageCountSynced := seriesproviderFields[23].Descriptor()
+	// seriesprovider.DefaultPageCountSynced holds the default value on creation for the page_count_synced field.
+	seriesprovider.DefaultPageCountSynced = seriesproviderDescPageCountSynced.Default.(bool)
 	// seriesproviderDescID is the schema descriptor for id field.
 	seriesproviderDescID := seriesproviderFields[0].Descriptor()
 	// seriesprovider.DefaultID holds the default value on creation for the id field.

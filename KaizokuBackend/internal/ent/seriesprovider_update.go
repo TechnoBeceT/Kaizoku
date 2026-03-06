@@ -420,6 +420,20 @@ func (_u *SeriesProviderUpdate) SetNillableStatus(v *string) *SeriesProviderUpda
 	return _u
 }
 
+// SetPageCountSynced sets the "page_count_synced" field.
+func (_u *SeriesProviderUpdate) SetPageCountSynced(v bool) *SeriesProviderUpdate {
+	_u.mutation.SetPageCountSynced(v)
+	return _u
+}
+
+// SetNillablePageCountSynced sets the "page_count_synced" field if the given value is not nil.
+func (_u *SeriesProviderUpdate) SetNillablePageCountSynced(v *bool) *SeriesProviderUpdate {
+	if v != nil {
+		_u.SetPageCountSynced(*v)
+	}
+	return _u
+}
+
 // SetChapters sets the "chapters" field.
 func (_u *SeriesProviderUpdate) SetChapters(v []types.Chapter) *SeriesProviderUpdate {
 	_u.mutation.SetChapters(v)
@@ -607,6 +621,9 @@ func (_u *SeriesProviderUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(seriesprovider.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PageCountSynced(); ok {
+		_spec.SetField(seriesprovider.FieldPageCountSynced, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Chapters(); ok {
 		_spec.SetField(seriesprovider.FieldChapters, field.TypeJSON, value)
@@ -1056,6 +1073,20 @@ func (_u *SeriesProviderUpdateOne) SetNillableStatus(v *string) *SeriesProviderU
 	return _u
 }
 
+// SetPageCountSynced sets the "page_count_synced" field.
+func (_u *SeriesProviderUpdateOne) SetPageCountSynced(v bool) *SeriesProviderUpdateOne {
+	_u.mutation.SetPageCountSynced(v)
+	return _u
+}
+
+// SetNillablePageCountSynced sets the "page_count_synced" field if the given value is not nil.
+func (_u *SeriesProviderUpdateOne) SetNillablePageCountSynced(v *bool) *SeriesProviderUpdateOne {
+	if v != nil {
+		_u.SetPageCountSynced(*v)
+	}
+	return _u
+}
+
 // SetChapters sets the "chapters" field.
 func (_u *SeriesProviderUpdateOne) SetChapters(v []types.Chapter) *SeriesProviderUpdateOne {
 	_u.mutation.SetChapters(v)
@@ -1273,6 +1304,9 @@ func (_u *SeriesProviderUpdateOne) sqlSave(ctx context.Context) (_node *SeriesPr
 	}
 	if value, ok := _u.mutation.Status(); ok {
 		_spec.SetField(seriesprovider.FieldStatus, field.TypeString, value)
+	}
+	if value, ok := _u.mutation.PageCountSynced(); ok {
+		_spec.SetField(seriesprovider.FieldPageCountSynced, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Chapters(); ok {
 		_spec.SetField(seriesprovider.FieldChapters, field.TypeJSON, value)

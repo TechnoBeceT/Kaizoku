@@ -92,12 +92,33 @@ func (d *DownloadDispatcher) Stop() {
 }
 
 // Enqueue adds a download job to the queue.
+// It deduplicates by series+chapter+provider: if a waiting or running download
+// already exists for the same combination, the new one is silently skipped.
 func (d *DownloadDispatcher) Enqueue(ctx context.Context, args types.DownloadChapterArgs, scheduledAt time.Time) error {
 	priority := 0
 	if args.ChapterNumber != nil {
 		// Use chapter number * 100 as priority (lower = higher priority).
 		// Multiplied to handle decimal chapters like 1.5.
 		priority = int(*args.ChapterNumber * 100)
+	}
+
+	// Dedup check: skip if a waiting/running download exists for same series+chapter
+	// regardless of provider — only one download per chapter should be active at a time
+	if args.ChapterNumber != nil {
+		exists, err := d.db.DownloadQueueItem.Query().
+			Where(
+				downloadqueueitem.StatusIn(types.DLStatusWaiting, types.DLStatusRunning),
+				func(s *sql.Selector) {
+					s.Where(sql.ExprP(
+						"(args->>'seriesId')::text = $1 AND (args->>'chapterNumber')::float = $2",
+						args.SeriesID.String(), *args.ChapterNumber,
+					))
+				},
+			).
+			Exist(ctx)
+		if err == nil && exists {
+			return nil // already queued for this chapter, skip silently
+		}
 	}
 
 	_, err := d.db.DownloadQueueItem.Create().

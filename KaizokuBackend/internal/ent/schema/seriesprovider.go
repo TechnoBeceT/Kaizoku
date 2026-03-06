@@ -39,6 +39,7 @@ func (SeriesProvider) Fields() []ent.Field {
 		field.Bool("is_disabled").Default(false),
 		field.Bool("is_uninstalled").Default(false),
 		field.String("status").Default("UNKNOWN"),
+		field.Bool("page_count_synced").Default(false),
 		field.JSON("chapters", []types.Chapter{}).Optional(),
 	}
 }

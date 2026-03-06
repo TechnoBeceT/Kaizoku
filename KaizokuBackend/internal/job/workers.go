@@ -234,6 +234,19 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 		return "", noPageErr
 	}
 
+	// Guard against truncated downloads: if Suwayomi reported a page count and we got
+	// significantly fewer pages (< 80%), treat as failure. A 404 mid-chapter from a flaky
+	// source would otherwise silently create a CBZ with missing pages.
+	if pageCountHint > 1 && float64(len(pages)) < float64(pageCountHint)*0.8 {
+		truncErr := fmt.Errorf("truncated download: got %d pages but expected ~%d for %s Ch.%s", len(pages), pageCountHint, args.Title, chapStr)
+		dlMeta["pagesDownloaded"] = strconv.Itoa(len(pages))
+		dlMeta["pagesExpected"] = strconv.Itoa(pageCountHint)
+		util.LogSourceEvent(d.DB, dlSourceID, args.ProviderName, args.Language,
+			"download", "failed", time.Since(dlStart).Milliseconds(),
+			util.WithError(truncErr), util.WithMetadata(dlMeta))
+		return "", truncErr
+	}
+
 	// Load series for metadata
 	series, err := d.DB.Series.Get(ctx, args.SeriesID)
 	if err != nil {
@@ -287,7 +300,12 @@ func (d *Deps) performDownload(ctx context.Context, args types.DownloadChapterAr
 	for i, ch := range chapters {
 		if ch.Number != nil && args.ChapterNumber != nil && *ch.Number == *args.ChapterNumber {
 			chapters[i].Filename = cbzFilename
-			chapters[i].PageCount = &pc
+			// Only update PageCount if we got more pages than what Suwayomi reported,
+			// or if no page count was stored yet. Never overwrite downward — a truncated
+			// download would hide the real count and make Verify unable to detect it.
+			if ch.PageCount == nil || pc > *ch.PageCount {
+				chapters[i].PageCount = &pc
+			}
 			chapters[i].DownloadDate = &now
 			chapters[i].ShouldDownload = false
 			chapters[i].IsDeleted = false
@@ -1073,6 +1091,7 @@ func (w *GetChaptersWorker) Work(ctx context.Context, job *river.Job[GetChapters
 	_, err = w.Deps.DB.SeriesProvider.UpdateOneID(sp.ID).
 		SetFetchDate(now).
 		SetChapterCount(int64(len(onlineChapters))).
+		SetPageCountSynced(true).
 		Save(ctx)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to update provider fetch date")
@@ -3351,9 +3370,38 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 	// Check each tracked chapter against disk
 	affectedProviderIDs := make(map[uuid.UUID]bool)
 	for _, p := range providers {
+		// Compute median page count for this provider's downloaded whole-number chapters.
+		// Used to detect statistical outliers (truncated downloads where PageCount was overwritten).
+		var pageCounts []int
+		for _, ch := range p.Chapters {
+			if ch.Filename != "" && !ch.IsDeleted && ch.PageCount != nil && *ch.PageCount > 0 {
+				// Only include whole-number chapters (skip .5 specials)
+				if ch.Number != nil && *ch.Number == float64(int(*ch.Number)) {
+					pageCounts = append(pageCounts, *ch.PageCount)
+				}
+			}
+		}
+		sort.Ints(pageCounts)
+		medianPC := 0
+		if len(pageCounts) >= 5 {
+			medianPC = pageCounts[len(pageCounts)/2]
+		}
+
 		changed := false
 		for i := range p.Chapters {
 			ch := &p.Chapters[i]
+
+			// Reset permanently failed chapters only if no other provider has this
+			// chapter downloaded — no point retrying if another source already has it on disk
+			if ch.IsPermanentlyFailed && ch.Filename == "" && ch.Number != nil && !trackedChapterNums[*ch.Number] {
+				ch.IsPermanentlyFailed = false
+				ch.ShouldDownload = true
+				result.MissingFiles++
+				result.FixedCount++
+				changed = true
+				continue
+			}
+
 			if ch.Filename == "" || ch.IsDeleted {
 				continue
 			}
@@ -3382,16 +3430,26 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 				result.MissingFiles++
 				result.FixedCount++
 				changed = true
-			} else if ch.PageCount != nil && *ch.PageCount > 0 {
-				// Archive is structurally valid — check page count for truncated files.
-				// Compare actual images in CBZ against the stored page count from the source.
+			} else {
+				// Archive is structurally valid — check for truncated files.
 				localPages := util.CountCBZPages(archivePath)
-				expected := *ch.PageCount
-				if localPages > 0 && float64(localPages) < float64(expected)*0.8 {
+				expected := 0
+				if ch.PageCount != nil && *ch.PageCount > 0 {
+					expected = *ch.PageCount
+				}
+				// Also use median as expected if it's higher — catches cases where
+				// a truncated download overwrote PageCount with its own wrong value.
+				// Only for whole-number chapters (skip .5 specials).
+				isWholeChapter := ch.Number != nil && *ch.Number == float64(int(*ch.Number))
+				if isWholeChapter && medianPC > expected {
+					expected = medianPC
+				}
+				if expected > 0 && localPages > 0 && float64(localPages) < float64(expected)*0.5 {
 					log.Warn().
 						Str("file", ch.Filename).
 						Int("localPages", localPages).
 						Int("expectedPages", expected).
+						Int("medianPC", medianPC).
 						Msg("verify: truncated CBZ detected, flagging for re-download")
 					result.BadFiles = append(result.BadFiles, types.ArchiveIntegrityResult{
 						Filename: ch.Filename,
@@ -3575,11 +3633,71 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 	totalOrphans := 0
 	totalFixed := 0
 
-	// Phase 1: Verify all series (skip auto-enqueue, we handle refresh below)
-	type providerRefresh struct {
-		providerID uuid.UUID
-		seriesTitle string
+	// Phase 1: Refresh page counts from Suwayomi for all active providers.
+	// This corrects PageCount values that were overwritten by truncated downloads,
+	// so the file integrity check in Phase 2 can detect them.
+	unsyncedProviders, _ := w.Deps.DB.SeriesProvider.Query().
+		Where(
+			seriesprovider.IsDisabledEQ(false),
+			seriesprovider.IsUninstalledEQ(false),
+			seriesprovider.IsUnknownEQ(false),
+			seriesprovider.PageCountSyncedEQ(false),
+		).
+		All(ctx)
+	refreshed := 0
+	refreshFailed := 0
+	if len(unsyncedProviders) > 0 {
+		log.Info().Int("count", len(unsyncedProviders)).Msg("verify-all: refreshing page counts for unsynced providers")
 	}
+	for i, sp := range unsyncedProviders {
+		pct := float64(i+1) / float64(len(unsyncedProviders)) * 20 // Phase 1 is 0-20%
+		w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
+			int(types.ProgressStatusRunning), pct,
+			fmt.Sprintf("Refreshing chapter metadata (%d/%d)", i+1, len(unsyncedProviders)), nil)
+
+		if sp.SuwayomiID == 0 {
+			continue
+		}
+		onlineChapters, err := w.Deps.Suwayomi.GetChapters(ctx, sp.SuwayomiID, false)
+		if err != nil {
+			refreshFailed++
+			log.Warn().Err(err).Str("provider", sp.Provider).Int("suwayomiId", sp.SuwayomiID).
+				Msg("verify-all: failed to refresh chapter metadata from Suwayomi")
+			time.Sleep(500 * time.Millisecond)
+			continue
+		}
+		// Build lookup: chapter number → online page count
+		onlinePC := make(map[float64]int)
+		for _, oc := range onlineChapters {
+			if oc.ChapterNumber != nil && oc.PageCount > 0 {
+				onlinePC[*oc.ChapterNumber] = oc.PageCount
+			}
+		}
+		// Update stored page counts where Suwayomi reports higher
+		changed := false
+		for j := range sp.Chapters {
+			ch := &sp.Chapters[j]
+			if ch.Number == nil {
+				continue
+			}
+			if opc, ok := onlinePC[*ch.Number]; ok && opc > 0 {
+				if ch.PageCount == nil || opc > *ch.PageCount {
+					ch.PageCount = &opc
+					changed = true
+				}
+			}
+		}
+		// Mark as synced and save — even if no page counts changed, the fetch succeeded
+		update := w.Deps.DB.SeriesProvider.UpdateOneID(sp.ID).SetPageCountSynced(true)
+		if changed {
+			update = update.SetChapters(sp.Chapters)
+		}
+		update.Exec(ctx)
+		refreshed++
+	}
+	log.Info().Int("refreshed", refreshed).Int("failed", refreshFailed).Msg("verify-all: page counts refreshed from Suwayomi")
+
+	// Phase 2: Verify all series
 	type seriesOrphanInfo struct {
 		SeriesID string   `json:"seriesId"`
 		Title    string   `json:"title"`
@@ -3590,12 +3708,12 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 		Title     string   `json:"title"`
 		Providers []string `json:"providers"` // provider names sharing the same importance
 	}
-	var needsRefresh []providerRefresh
 	var seriesWithOrphans []seriesOrphanInfo
 	var seriesWithDupImportance []duplicateImportanceInfo
+	affectedProviderSet := make(map[uuid.UUID]bool)
 
 	for i, s := range allSeries {
-		pct := float64(i+1) / float64(total) * 50 // Phase 1 is 0-50%
+		pct := 20 + float64(i+1)/float64(total)*60 // Phase 2 is 20-80%
 		w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
 			int(types.ProgressStatusRunning), pct,
 			fmt.Sprintf("Verifying %s (%d/%d)", s.Title, i+1, total), nil)
@@ -3606,19 +3724,18 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 		totalOrphans += len(result.OrphanFiles)
 		totalFixed += result.FixedCount
 
+		for _, pid := range result.AffectedProviderIDs {
+			if uid, err := uuid.Parse(pid); err == nil {
+				affectedProviderSet[uid] = true
+			}
+		}
+
 		if len(result.OrphanFiles) > 0 {
 			seriesWithOrphans = append(seriesWithOrphans, seriesOrphanInfo{
 				SeriesID: s.ID.String(),
 				Title:    s.Title,
 				Orphans:  result.OrphanFiles,
 			})
-		}
-
-		for _, pid := range result.AffectedProviderIDs {
-			uid, err := uuid.Parse(pid)
-			if err == nil {
-				needsRefresh = append(needsRefresh, providerRefresh{providerID: uid, seriesTitle: s.Title})
-			}
 		}
 
 		// Check for duplicate importance values
@@ -3650,21 +3767,22 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 		}
 	}
 
-	// Phase 2: Enqueue chapter refresh for affected providers
+	// Phase 3: Enqueue GetChapters for providers that had issues (to trigger re-downloads).
 	refreshQueued := 0
-	if len(needsRefresh) > 0 {
-		refreshTotal := len(needsRefresh)
-		for i, pr := range needsRefresh {
-			pct := 50 + float64(i+1)/float64(refreshTotal)*50 // Phase 2 is 50-100%
+	if len(affectedProviderSet) > 0 {
+		i := 0
+		for pid := range affectedProviderSet {
+			pct := 80 + float64(i+1)/float64(len(affectedProviderSet))*20 // Phase 3 is 80-100%
 			w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
 				int(types.ProgressStatusRunning), pct,
-				fmt.Sprintf("Scheduling chapter refresh for %s (%d/%d)", pr.seriesTitle, i+1, refreshTotal), nil)
+				fmt.Sprintf("Scheduling chapter refresh (%d/%d)", i+1, len(affectedProviderSet)), nil)
 
-			if _, err := w.Deps.enqueueGetChapters(ctx, pr.providerID); err != nil {
-				log.Warn().Err(err).Str("providerId", pr.providerID.String()).Msg("verify-all: failed to enqueue GetChapters")
+			if _, err := w.Deps.enqueueGetChapters(ctx, pid); err != nil {
+				log.Warn().Err(err).Str("providerId", pid.String()).Msg("verify-all: failed to enqueue GetChapters")
 			} else {
 				refreshQueued++
 			}
+			i++
 		}
 	}
 

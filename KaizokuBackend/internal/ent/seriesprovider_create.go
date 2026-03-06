@@ -310,6 +310,20 @@ func (_c *SeriesProviderCreate) SetNillableStatus(v *string) *SeriesProviderCrea
 	return _c
 }
 
+// SetPageCountSynced sets the "page_count_synced" field.
+func (_c *SeriesProviderCreate) SetPageCountSynced(v bool) *SeriesProviderCreate {
+	_c.mutation.SetPageCountSynced(v)
+	return _c
+}
+
+// SetNillablePageCountSynced sets the "page_count_synced" field if the given value is not nil.
+func (_c *SeriesProviderCreate) SetNillablePageCountSynced(v *bool) *SeriesProviderCreate {
+	if v != nil {
+		_c.SetPageCountSynced(*v)
+	}
+	return _c
+}
+
 // SetChapters sets the "chapters" field.
 func (_c *SeriesProviderCreate) SetChapters(v []types.Chapter) *SeriesProviderCreate {
 	_c.mutation.SetChapters(v)
@@ -414,6 +428,10 @@ func (_c *SeriesProviderCreate) defaults() {
 		v := seriesprovider.DefaultStatus
 		_c.mutation.SetStatus(v)
 	}
+	if _, ok := _c.mutation.PageCountSynced(); !ok {
+		v := seriesprovider.DefaultPageCountSynced
+		_c.mutation.SetPageCountSynced(v)
+	}
 	if _, ok := _c.mutation.ID(); !ok {
 		v := seriesprovider.DefaultID()
 		_c.mutation.SetID(v)
@@ -460,6 +478,9 @@ func (_c *SeriesProviderCreate) check() error {
 	}
 	if _, ok := _c.mutation.Status(); !ok {
 		return &ValidationError{Name: "status", err: errors.New(`ent: missing required field "SeriesProvider.status"`)}
+	}
+	if _, ok := _c.mutation.PageCountSynced(); !ok {
+		return &ValidationError{Name: "page_count_synced", err: errors.New(`ent: missing required field "SeriesProvider.page_count_synced"`)}
 	}
 	if len(_c.mutation.SeriesIDs()) == 0 {
 		return &ValidationError{Name: "series", err: errors.New(`ent: missing required edge "SeriesProvider.series"`)}
@@ -583,6 +604,10 @@ func (_c *SeriesProviderCreate) createSpec() (*SeriesProvider, *sqlgraph.CreateS
 	if value, ok := _c.mutation.Status(); ok {
 		_spec.SetField(seriesprovider.FieldStatus, field.TypeString, value)
 		_node.Status = value
+	}
+	if value, ok := _c.mutation.PageCountSynced(); ok {
+		_spec.SetField(seriesprovider.FieldPageCountSynced, field.TypeBool, value)
+		_node.PageCountSynced = value
 	}
 	if value, ok := _c.mutation.Chapters(); ok {
 		_spec.SetField(seriesprovider.FieldChapters, field.TypeJSON, value)
@@ -996,6 +1021,18 @@ func (u *SeriesProviderUpsert) SetStatus(v string) *SeriesProviderUpsert {
 // UpdateStatus sets the "status" field to the value that was provided on create.
 func (u *SeriesProviderUpsert) UpdateStatus() *SeriesProviderUpsert {
 	u.SetExcluded(seriesprovider.FieldStatus)
+	return u
+}
+
+// SetPageCountSynced sets the "page_count_synced" field.
+func (u *SeriesProviderUpsert) SetPageCountSynced(v bool) *SeriesProviderUpsert {
+	u.Set(seriesprovider.FieldPageCountSynced, v)
+	return u
+}
+
+// UpdatePageCountSynced sets the "page_count_synced" field to the value that was provided on create.
+func (u *SeriesProviderUpsert) UpdatePageCountSynced() *SeriesProviderUpsert {
+	u.SetExcluded(seriesprovider.FieldPageCountSynced)
 	return u
 }
 
@@ -1461,6 +1498,20 @@ func (u *SeriesProviderUpsertOne) SetStatus(v string) *SeriesProviderUpsertOne {
 func (u *SeriesProviderUpsertOne) UpdateStatus() *SeriesProviderUpsertOne {
 	return u.Update(func(s *SeriesProviderUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetPageCountSynced sets the "page_count_synced" field.
+func (u *SeriesProviderUpsertOne) SetPageCountSynced(v bool) *SeriesProviderUpsertOne {
+	return u.Update(func(s *SeriesProviderUpsert) {
+		s.SetPageCountSynced(v)
+	})
+}
+
+// UpdatePageCountSynced sets the "page_count_synced" field to the value that was provided on create.
+func (u *SeriesProviderUpsertOne) UpdatePageCountSynced() *SeriesProviderUpsertOne {
+	return u.Update(func(s *SeriesProviderUpsert) {
+		s.UpdatePageCountSynced()
 	})
 }
 
@@ -2096,6 +2147,20 @@ func (u *SeriesProviderUpsertBulk) SetStatus(v string) *SeriesProviderUpsertBulk
 func (u *SeriesProviderUpsertBulk) UpdateStatus() *SeriesProviderUpsertBulk {
 	return u.Update(func(s *SeriesProviderUpsert) {
 		s.UpdateStatus()
+	})
+}
+
+// SetPageCountSynced sets the "page_count_synced" field.
+func (u *SeriesProviderUpsertBulk) SetPageCountSynced(v bool) *SeriesProviderUpsertBulk {
+	return u.Update(func(s *SeriesProviderUpsert) {
+		s.SetPageCountSynced(v)
+	})
+}
+
+// UpdatePageCountSynced sets the "page_count_synced" field to the value that was provided on create.
+func (u *SeriesProviderUpsertBulk) UpdatePageCountSynced() *SeriesProviderUpsertBulk {
+	return u.Update(func(s *SeriesProviderUpsert) {
+		s.UpdatePageCountSynced()
 	})
 }
 

@@ -203,6 +203,7 @@ var (
 		{Name: "is_disabled", Type: field.TypeBool, Default: false},
 		{Name: "is_uninstalled", Type: field.TypeBool, Default: false},
 		{Name: "status", Type: field.TypeString, Default: "UNKNOWN"},
+		{Name: "page_count_synced", Type: field.TypeBool, Default: false},
 		{Name: "chapters", Type: field.TypeJSON, Nullable: true},
 		{Name: "series_id", Type: field.TypeUUID},
 	}
@@ -214,7 +215,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "series_providers_series_providers",
-				Columns:    []*schema.Column{SeriesProvidersColumns[23]},
+				Columns:    []*schema.Column{SeriesProvidersColumns[24]},
 				RefColumns: []*schema.Column{SeriesColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -223,7 +224,7 @@ var (
 			{
 				Name:    "seriesprovider_series_id",
 				Unique:  false,
-				Columns: []*schema.Column{SeriesProvidersColumns[23]},
+				Columns: []*schema.Column{SeriesProvidersColumns[24]},
 			},
 			{
 				Name:    "seriesprovider_suwayomi_id",

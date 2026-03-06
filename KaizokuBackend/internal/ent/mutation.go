@@ -5646,6 +5646,7 @@ type SeriesProviderMutation struct {
 	is_disabled               *bool
 	is_uninstalled            *bool
 	status                    *string
+	page_count_synced         *bool
 	chapters                  *[]types.Chapter
 	appendchapters            []types.Chapter
 	clearedFields             map[string]struct{}
@@ -6767,6 +6768,42 @@ func (m *SeriesProviderMutation) ResetStatus() {
 	m.status = nil
 }
 
+// SetPageCountSynced sets the "page_count_synced" field.
+func (m *SeriesProviderMutation) SetPageCountSynced(b bool) {
+	m.page_count_synced = &b
+}
+
+// PageCountSynced returns the value of the "page_count_synced" field in the mutation.
+func (m *SeriesProviderMutation) PageCountSynced() (r bool, exists bool) {
+	v := m.page_count_synced
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldPageCountSynced returns the old "page_count_synced" field's value of the SeriesProvider entity.
+// If the SeriesProvider object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *SeriesProviderMutation) OldPageCountSynced(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldPageCountSynced is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldPageCountSynced requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldPageCountSynced: %w", err)
+	}
+	return oldValue.PageCountSynced, nil
+}
+
+// ResetPageCountSynced resets all changes to the "page_count_synced" field.
+func (m *SeriesProviderMutation) ResetPageCountSynced() {
+	m.page_count_synced = nil
+}
+
 // SetChapters sets the "chapters" field.
 func (m *SeriesProviderMutation) SetChapters(t []types.Chapter) {
 	m.chapters = &t
@@ -6893,7 +6930,7 @@ func (m *SeriesProviderMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *SeriesProviderMutation) Fields() []string {
-	fields := make([]string, 0, 23)
+	fields := make([]string, 0, 24)
 	if m.series != nil {
 		fields = append(fields, seriesprovider.FieldSeriesID)
 	}
@@ -6960,6 +6997,9 @@ func (m *SeriesProviderMutation) Fields() []string {
 	if m.status != nil {
 		fields = append(fields, seriesprovider.FieldStatus)
 	}
+	if m.page_count_synced != nil {
+		fields = append(fields, seriesprovider.FieldPageCountSynced)
+	}
 	if m.chapters != nil {
 		fields = append(fields, seriesprovider.FieldChapters)
 	}
@@ -7015,6 +7055,8 @@ func (m *SeriesProviderMutation) Field(name string) (ent.Value, bool) {
 		return m.IsUninstalled()
 	case seriesprovider.FieldStatus:
 		return m.Status()
+	case seriesprovider.FieldPageCountSynced:
+		return m.PageCountSynced()
 	case seriesprovider.FieldChapters:
 		return m.Chapters()
 	}
@@ -7070,6 +7112,8 @@ func (m *SeriesProviderMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldIsUninstalled(ctx)
 	case seriesprovider.FieldStatus:
 		return m.OldStatus(ctx)
+	case seriesprovider.FieldPageCountSynced:
+		return m.OldPageCountSynced(ctx)
 	case seriesprovider.FieldChapters:
 		return m.OldChapters(ctx)
 	}
@@ -7234,6 +7278,13 @@ func (m *SeriesProviderMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetStatus(v)
+		return nil
+	case seriesprovider.FieldPageCountSynced:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetPageCountSynced(v)
 		return nil
 	case seriesprovider.FieldChapters:
 		v, ok := value.([]types.Chapter)
@@ -7470,6 +7521,9 @@ func (m *SeriesProviderMutation) ResetField(name string) error {
 		return nil
 	case seriesprovider.FieldStatus:
 		m.ResetStatus()
+		return nil
+	case seriesprovider.FieldPageCountSynced:
+		m.ResetPageCountSynced()
 		return nil
 	case seriesprovider.FieldChapters:
 		m.ResetChapters()
