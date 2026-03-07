@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 	"github.com/rs/zerolog/log"
@@ -43,6 +44,7 @@ type SettingsReader interface {
 // Deps holds shared dependencies injected into job workers.
 type Deps struct {
 	DB            *ent.Client
+	Pool          *pgxpool.Pool       // Raw pgx pool for queries not supported by Ent (e.g. river_job)
 	Suwayomi      *suwayomi.Client
 	Progress      ProgressBroadcaster
 	Config        *config.Config
@@ -413,10 +415,10 @@ func (d *Deps) enqueueNextFallback(ctx context.Context, args types.DownloadChapt
 			PageCount:         pc,
 			UploadDate:        args.UploadDate,
 			FallbackProviders: remaining,
-			CascadeRetries:    0,
+			CascadeRetries:    args.CascadeRetries + 1,
 		}
 
-		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now()); err != nil {
+		if err := d.DownloadQueue.EnqueueCascade(ctx, newArgs, time.Now()); err != nil {
 			log.Warn().Err(err).Str("provider", fallbackSP.Provider).Msg("failed to enqueue cascade fallback")
 			continue
 		}
@@ -466,8 +468,10 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 	var primaryURL string
 	var primaryPC int
 
+	// Prefer a DIFFERENT provider than the one that just failed.
+	// This avoids retrying the same broken source immediately — try an alternative first.
 	for _, sp := range allProviders {
-		if sp.SuwayomiID == 0 {
+		if sp.SuwayomiID == 0 || sp.ID == args.ProviderID {
 			continue
 		}
 		idx, url, pc := findChapterInProvider(sp, args.ChapterNumber)
@@ -477,6 +481,22 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 			primaryURL = url
 			primaryPC = pc
 			break
+		}
+	}
+	// If no alternative has the chapter, fall back to the original provider
+	if primary == nil {
+		for _, sp := range allProviders {
+			if sp.SuwayomiID == 0 {
+				continue
+			}
+			idx, url, pc := findChapterInProvider(sp, args.ChapterNumber)
+			if idx >= 0 {
+				primary = sp
+				primaryChIdx = idx
+				primaryURL = url
+				primaryPC = pc
+				break
+			}
 		}
 	}
 
@@ -517,7 +537,7 @@ func (d *Deps) scheduleFullCascadeRetry(ctx context.Context, args types.Download
 		CascadeRetries:    args.CascadeRetries + 1,
 	}
 
-	if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
+	if err := d.DownloadQueue.EnqueueCascade(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
 		log.Warn().Err(err).Msg("failed to schedule cascade retry")
 		return false
 	}
@@ -631,7 +651,7 @@ func (d *Deps) handleDownloadSuccess(ctx context.Context, args types.DownloadCha
 			ReplacingFilename:   cbzFilename,
 		}
 
-		if err := d.DownloadQueue.Enqueue(ctx, repArgs, time.Now().Add(retryDelay)); err != nil {
+		if err := d.DownloadQueue.EnqueueCascade(ctx, repArgs, time.Now().Add(retryDelay)); err != nil {
 			log.Warn().Err(err).Msg("failed to schedule replacement download")
 		} else {
 			log.Info().
@@ -791,7 +811,7 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 		newArgs := args
 		newArgs.ReplacementRetry++
 
-		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
+		if err := d.DownloadQueue.EnqueueCascade(ctx, newArgs, time.Now().Add(retryDelay)); err != nil {
 			log.Warn().Err(err).Msg("failed to schedule replacement retry")
 			return false
 		}
@@ -861,7 +881,7 @@ func (d *Deps) handleReplacementFailure(ctx context.Context, args types.Download
 			ReplacementRetry:    0,
 		}
 
-		if err := d.DownloadQueue.Enqueue(ctx, newArgs, time.Now().Add(nextRetryDelay)); err != nil {
+		if err := d.DownloadQueue.EnqueueCascade(ctx, newArgs, time.Now().Add(nextRetryDelay)); err != nil {
 			log.Warn().Err(err).Msg("failed to schedule next replacement provider")
 			continue
 		}
@@ -1184,6 +1204,42 @@ func reconcileChapters(sp *ent.SeriesProvider, onlineChapters []suwayomi.Suwayom
 		}
 	}
 
+	// Sync availability: mark chapters based on whether the source still returns them.
+	// This prevents stale entries from blocking other providers via bestActiveAvailable.
+	onlineNums := make(map[float64]bool)
+	for _, online := range filtered {
+		if online.ChapterNumber != nil {
+			onlineNums[*online.ChapterNumber] = true
+		}
+	}
+
+	continueAfter := 0.0
+	if sp.ContinueAfterChapter != nil {
+		continueAfter = *sp.ContinueAfterChapter
+	}
+
+	for i, ch := range chapters {
+		if ch.Number == nil {
+			continue
+		}
+		if !onlineNums[*ch.Number] {
+			// Chapter was in stored list but source no longer returns it — mark unavailable
+			if ch.ShouldDownload && ch.Filename == "" && !ch.IsPermanentlyFailed && !ch.IsDeleted {
+				chapters[i].ShouldDownload = false
+				changed = true
+			}
+		} else {
+			// Chapter is back in source — re-enable if it was previously marked unavailable.
+			// Don't re-enable chapters below ContinueAfterChapter (import boundary).
+			if !ch.ShouldDownload && ch.Filename == "" && !ch.IsPermanentlyFailed && !ch.IsDeleted {
+				if continueAfter == 0 || *ch.Number > continueAfter {
+					chapters[i].ShouldDownload = true
+					changed = true
+				}
+			}
+		}
+	}
+
 	return chapters, changed
 }
 
@@ -1266,8 +1322,12 @@ func generateDownloads(sp *ent.SeriesProvider, allProviders []*ent.SeriesProvide
 				}
 			}
 
-			// Track available chapters (in chapter list, regardless of download status)
-			if isActive {
+			// Track available chapters (in chapter list, but NOT permanently failed or unavailable).
+			// Permanently failed chapters shouldn't block other providers from trying.
+			// Chapters with ShouldDownload=false and no file are confirmed unavailable
+			// (source no longer returns them) — don't count as "available".
+			isUnavailable := ch.IsPermanentlyFailed || (!ch.ShouldDownload && ch.Filename == "")
+			if isActive && !isUnavailable {
 				if status.bestActiveAvailable == -1 || other.Importance < status.bestActiveAvailable {
 					status.bestActiveAvailable = other.Importance
 				}
@@ -3391,14 +3451,39 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 		for i := range p.Chapters {
 			ch := &p.Chapters[i]
 
-			// Reset permanently failed chapters only if no other provider has this
-			// chapter downloaded — no point retrying if another source already has it on disk
+			// Handle permanently failed chapters that have no file on disk from ANY provider.
+			// Instead of blindly retrying the same source, prefer alternative sources.
 			if ch.IsPermanentlyFailed && ch.Filename == "" && ch.Number != nil && !trackedChapterNums[*ch.Number] {
-				ch.IsPermanentlyFailed = false
-				ch.ShouldDownload = true
+				// Check if any other active provider has this chapter available.
+				// providers is sorted by importance, so the first match is the best alternative.
+				hasAlternative := false
+				for _, other := range providers {
+					if other.ID == p.ID || other.IsDisabled || other.IsUninstalled || other.IsUnknown {
+						continue
+					}
+					for _, otherCh := range other.Chapters {
+						if otherCh.Number != nil && *otherCh.Number == *ch.Number && !otherCh.IsPermanentlyFailed {
+							hasAlternative = true
+							affectedProviderIDs[other.ID] = true
+							break
+						}
+					}
+					if hasAlternative {
+						break
+					}
+				}
+
+				if !hasAlternative {
+					// No alternative source — reset and retry on this provider
+					ch.IsPermanentlyFailed = false
+					ch.ShouldDownload = true
+					changed = true
+				}
+				// With alternatives: leave this provider's chapter as permanently failed.
+				// The bestActiveAvailable fix excludes permanently failed chapters, so
+				// the alternative provider's generateDownloads will pick it up.
 				result.MissingFiles++
 				result.FixedCount++
-				changed = true
 				continue
 			}
 
@@ -3558,6 +3643,34 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 		log.Warn().Err(err).Msg("verify: failed to regenerate kaizoku.json")
 	}
 
+	// Check for "stuck" chapters: ShouldDownload=true + no file on disk from ANY provider.
+	// These occur when Verify deleted corrupt files but GetChapters hasn't re-queued downloads,
+	// or when a source removed chapters after they were tracked.
+	// Mark the BEST provider for each stuck chapter so GetChapters runs and either downloads
+	// it or marks the chapter as stale (allowing other providers to try).
+	stuckChapterNums := make(map[float64]bool)
+	for _, p := range providers {
+		for _, ch := range p.Chapters {
+			if ch.Number != nil && ch.ShouldDownload && ch.Filename == "" && !ch.IsPermanentlyFailed && !ch.IsDeleted {
+				if !trackedChapterNums[*ch.Number] {
+					stuckChapterNums[*ch.Number] = true
+				}
+			}
+		}
+	}
+	if len(stuckChapterNums) > 0 {
+		log.Info().Str("series", s.Title).Int("stuckCount", len(stuckChapterNums)).
+			Msg("verify: found stuck chapters needing re-download")
+		// Mark all active providers for refresh so reconcileChapters marks stale entries
+		// and the provider that actually has the chapter generates the download.
+		for _, p := range providers {
+			if p.IsDisabled || p.IsUninstalled || p.IsUnknown {
+				continue
+			}
+			affectedProviderIDs[p.ID] = true
+		}
+	}
+
 	// Collect only providers that actually had issues (missing/corrupt files)
 	for _, sp := range providers {
 		if affectedProviderIDs[sp.ID] {
@@ -3588,8 +3701,20 @@ func (d *Deps) enqueueGetChapters(ctx context.Context, providerID uuid.UUID) (bo
 	if d.RiverClient == nil {
 		return false, fmt.Errorf("river client not available")
 	}
-	// Include all required states plus completed/cancelled/discarded so that
-	// finished jobs don't block new inserts from verify-triggered refreshes.
+	// Clear unique_key on finished GetChapters jobs for this provider so they
+	// don't block new inserts. River stores unique_states on the job row at
+	// insert time — old jobs may include "completed" in their bitfield, which
+	// causes River to treat them as duplicates even though we only want to
+	// deduplicate against pending/scheduled/available/running jobs.
+	if d.Pool != nil {
+		_, _ = d.Pool.Exec(ctx,
+			`UPDATE river_job SET unique_key = NULL, unique_states = NULL
+			 WHERE kind = 'get_chapters' AND state IN ('completed', 'discarded')
+			   AND args @> $1::jsonb AND unique_key IS NOT NULL`,
+			fmt.Sprintf(`{"providerId":"%s"}`, providerID.String()),
+		)
+	}
+
 	_, err := d.RiverClient.Insert(ctx, GetChaptersArgs{ProviderID: providerID}, &river.InsertOpts{
 		UniqueOpts: river.UniqueOpts{
 			ByArgs: true,
@@ -3780,6 +3905,7 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 	}
 
 	// Phase 3: Enqueue GetChapters for providers that had issues (to trigger re-downloads).
+	log.Info().Int("affectedProviders", len(affectedProviderSet)).Msg("verify-all: Phase 3 starting")
 	refreshQueued := 0
 	if len(affectedProviderSet) > 0 {
 		i := 0

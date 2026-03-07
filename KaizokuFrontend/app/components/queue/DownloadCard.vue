@@ -85,9 +85,9 @@ function onImgError(e: Event) {
           <span v-if="download.language"> &middot; {{ download.language }}</span>
         </div>
         <div class="flex items-center gap-2 text-xs text-muted">
-          <span v-if="download.retries > 0">
-            Retries: {{ download.retries }}
-          </span>
+          <UBadge v-if="download.retries > 0" color="warning" size="xs" variant="subtle">
+            Retry #{{ download.retries }}
+          </UBadge>
           <span v-if="scheduledTimeLabel">
             {{ scheduledTimeLabel }}
           </span>

@@ -36,6 +36,7 @@ func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suw
 
 	deps := &Deps{
 		DB:       db,
+		Pool:     pool,
 		Suwayomi: sw,
 		Progress: progress,
 		Config:   cfg,

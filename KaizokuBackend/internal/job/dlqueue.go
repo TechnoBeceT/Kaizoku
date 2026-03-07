@@ -95,6 +95,17 @@ func (d *DownloadDispatcher) Stop() {
 // It deduplicates by series+chapter+provider: if a waiting or running download
 // already exists for the same combination, the new one is silently skipped.
 func (d *DownloadDispatcher) Enqueue(ctx context.Context, args types.DownloadChapterArgs, scheduledAt time.Time) error {
+	return d.enqueue(ctx, args, scheduledAt, false)
+}
+
+// EnqueueCascade enqueues a download bypassing dedup checks.
+// Used by cascade/fallback/retry paths where the previous attempt failed
+// and we intentionally want to try a different provider.
+func (d *DownloadDispatcher) EnqueueCascade(ctx context.Context, args types.DownloadChapterArgs, scheduledAt time.Time) error {
+	return d.enqueue(ctx, args, scheduledAt, true)
+}
+
+func (d *DownloadDispatcher) enqueue(ctx context.Context, args types.DownloadChapterArgs, scheduledAt time.Time, skipCrossProviderDedup bool) error {
 	priority := 0
 	if args.ChapterNumber != nil {
 		// Use chapter number * 100 as priority (lower = higher priority).
@@ -102,22 +113,41 @@ func (d *DownloadDispatcher) Enqueue(ctx context.Context, args types.DownloadCha
 		priority = int(*args.ChapterNumber * 100)
 	}
 
-	// Dedup check: skip if a waiting/running download exists for same series+chapter
-	// regardless of provider — only one download per chapter should be active at a time
 	if args.ChapterNumber != nil {
+		// Always check for same-provider duplicates (series+chapter+provider).
+		// This prevents the same provider from queuing the same chapter twice.
 		exists, err := d.db.DownloadQueueItem.Query().
 			Where(
 				downloadqueueitem.StatusIn(types.DLStatusWaiting, types.DLStatusRunning),
 				func(s *sql.Selector) {
 					s.Where(sql.ExprP(
-						"(args->>'seriesId')::text = $1 AND (args->>'chapterNumber')::float = $2",
-						args.SeriesID.String(), *args.ChapterNumber,
+						"(args->>'seriesId')::text = $1 AND (args->>'chapterNumber')::float = $2 AND (args->>'providerId')::text = $3",
+						args.SeriesID.String(), *args.ChapterNumber, args.ProviderID.String(),
 					))
 				},
 			).
 			Exist(ctx)
 		if err == nil && exists {
-			return nil // already queued for this chapter, skip silently
+			return nil
+		}
+
+		// Cross-provider dedup: skip if ANY provider already has this chapter queued.
+		// Cascade/fallback paths skip this because they intentionally try a different provider.
+		if !skipCrossProviderDedup {
+			exists, err := d.db.DownloadQueueItem.Query().
+				Where(
+					downloadqueueitem.StatusIn(types.DLStatusWaiting, types.DLStatusRunning),
+					func(s *sql.Selector) {
+						s.Where(sql.ExprP(
+							"(args->>'seriesId')::text = $1 AND (args->>'chapterNumber')::float = $2",
+							args.SeriesID.String(), *args.ChapterNumber,
+						))
+					},
+				).
+				Exist(ctx)
+			if err == nil && exists {
+				return nil
+			}
 		}
 	}
 
