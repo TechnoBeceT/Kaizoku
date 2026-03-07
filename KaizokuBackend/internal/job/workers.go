@@ -3357,6 +3357,27 @@ func buildKaizokuInfo(s *ent.Series, providers []*ent.SeriesProvider) types.Kaiz
 	return info
 }
 
+// findAlternativeProvider checks if any other active provider has a chapter available
+// (not permanently failed). If found, adds that provider to affectedProviderIDs so
+// generateDownloads will pick it up. Returns true if an alternative was found.
+func findAlternativeProvider(ch *types.Chapter, currentProviderID uuid.UUID, providers []*ent.SeriesProvider, affectedProviderIDs map[uuid.UUID]bool) bool {
+	if ch.Number == nil {
+		return false
+	}
+	for _, other := range providers {
+		if other.ID == currentProviderID || other.IsDisabled || other.IsUninstalled || other.IsUnknown {
+			continue
+		}
+		for _, otherCh := range other.Chapters {
+			if otherCh.Number != nil && *otherCh.Number == *ch.Number && !otherCh.IsPermanentlyFailed {
+				affectedProviderIDs[other.ID] = true
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // VerifySeriesIntegrity performs comprehensive integrity verification for a single series.
 // It checks files against DB, fixes DB records for missing/bad files, detects orphans,
 // recalculates ContinueAfterChapter, regenerates kaizoku.json, and enqueues re-downloads.
@@ -3454,34 +3475,13 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 			// Handle permanently failed chapters that have no file on disk from ANY provider.
 			// Instead of blindly retrying the same source, prefer alternative sources.
 			if ch.IsPermanentlyFailed && ch.Filename == "" && ch.Number != nil && !trackedChapterNums[*ch.Number] {
-				// Check if any other active provider has this chapter available.
-				// providers is sorted by importance, so the first match is the best alternative.
-				hasAlternative := false
-				for _, other := range providers {
-					if other.ID == p.ID || other.IsDisabled || other.IsUninstalled || other.IsUnknown {
-						continue
-					}
-					for _, otherCh := range other.Chapters {
-						if otherCh.Number != nil && *otherCh.Number == *ch.Number && !otherCh.IsPermanentlyFailed {
-							hasAlternative = true
-							affectedProviderIDs[other.ID] = true
-							break
-						}
-					}
-					if hasAlternative {
-						break
-					}
+				if findAlternativeProvider(ch, p.ID, providers, affectedProviderIDs) {
+					// Alternative found — leave this provider's chapter as permanently failed.
+					// The bestActiveAvailable fix excludes permanently failed chapters, so
+					// the alternative provider's generateDownloads will pick it up.
 				}
-
-				if !hasAlternative {
-					// No alternative source — reset and retry on this provider
-					ch.IsPermanentlyFailed = false
-					ch.ShouldDownload = true
-					changed = true
-				}
-				// With alternatives: leave this provider's chapter as permanently failed.
-				// The bestActiveAvailable fix excludes permanently failed chapters, so
-				// the alternative provider's generateDownloads will pick it up.
+				// No alternative: leave as permanently failed. Don't reset and burn
+				// through max retries again on the same source that already exhausted them.
 				result.MissingFiles++
 				result.FixedCount++
 				continue
@@ -3505,13 +3505,20 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					}
 				}
 
-				// Fix DB record: clear filename, mark for re-download
+				// Fix DB record: clear filename, prefer alternative source
 				delete(trackedFiles, ch.Filename)
 				ch.Filename = ""
 				ch.DownloadDate = nil
 				ch.IsDeleted = false
-				ch.IsPermanentlyFailed = false
-				ch.ShouldDownload = true
+				ch.IsPermanentlyFailed = true
+				ch.ShouldDownload = false
+				if ch.Number != nil && findAlternativeProvider(ch, p.ID, providers, affectedProviderIDs) {
+					// Alternative found — this provider gave a bad file, mark permanently failed
+					// and let the alternative provider handle it.
+				} else {
+					// No alternative — leave as permanently failed rather than retrying
+					// 144 times on the same source that gave a corrupt file.
+				}
 				result.MissingFiles++
 				result.FixedCount++
 				changed = true
@@ -3559,8 +3566,12 @@ func (d *Deps) VerifySeriesIntegrity(ctx context.Context, seriesID uuid.UUID, st
 					ch.Filename = ""
 					ch.DownloadDate = nil
 					ch.IsDeleted = false
-					ch.IsPermanentlyFailed = false
-					ch.ShouldDownload = true
+					ch.IsPermanentlyFailed = true
+					ch.ShouldDownload = false
+					if ch.Number != nil && findAlternativeProvider(ch, p.ID, providers, affectedProviderIDs) {
+						// Alternative found — this provider gave a truncated file
+					}
+					// No alternative: leave as permanently failed
 					result.MissingFiles++
 					result.FixedCount++
 					changed = true
@@ -4070,11 +4081,10 @@ func (w *UpgradeAllSourcesWorker) upgradeSeriesSources(ctx context.Context, s *e
 				continue
 			}
 
-			// Reset permanently failed flag on best source's chapter so it gets a fresh chance
+			// If the best provider's chapter is permanently failed, don't retry it —
+			// it already exhausted all retries. Keep the inferior copy instead.
 			if best.chapter.IsPermanentlyFailed {
-				best.chapter.IsPermanentlyFailed = false
-				best.chapter.ShouldDownload = true
-				modifiedProviders[best.provider.ID] = true
+				continue
 			}
 
 			// Queue download from best provider to replace this inferior copy
