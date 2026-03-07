@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/technobecet/kaizoku-go/internal/config"
 	"github.com/technobecet/kaizoku-go/internal/ent"
+	"github.com/technobecet/kaizoku-go/internal/service/komga"
 	settingssvc "github.com/technobecet/kaizoku-go/internal/service/settings"
 	"github.com/technobecet/kaizoku-go/internal/service/suwayomi"
 	"github.com/technobecet/kaizoku-go/internal/types"
@@ -52,4 +53,32 @@ func (h *SettingsHandler) UpdateSettings(c echo.Context) error {
 	}
 
 	return c.JSON(http.StatusOK, map[string]string{"message": "Settings updated successfully"})
+}
+
+func (h *SettingsHandler) TestKomga(c echo.Context) error {
+	var req struct {
+		URL      string `json:"url"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	}
+	if req.URL == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "URL is required"})
+	}
+
+	client := komga.NewClient(req.URL, req.Username, req.Password)
+	if err := client.TestConnection(c.Request().Context()); err != nil {
+		return c.JSON(http.StatusOK, map[string]any{
+			"success": false,
+			"error":   err.Error(),
+		})
+	}
+
+	libs, _ := client.GetLibraries(c.Request().Context())
+	return c.JSON(http.StatusOK, map[string]any{
+		"success":   true,
+		"libraries": libs,
+	})
 }

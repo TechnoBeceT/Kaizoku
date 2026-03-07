@@ -26,6 +26,7 @@ import (
 	"github.com/technobecet/kaizoku-go/internal/ent/series"
 	"github.com/technobecet/kaizoku-go/internal/ent/seriesprovider"
 	"github.com/technobecet/kaizoku-go/internal/ent/sourceevent"
+	"github.com/technobecet/kaizoku-go/internal/service/komga"
 	"github.com/technobecet/kaizoku-go/internal/service/suwayomi"
 	"github.com/technobecet/kaizoku-go/internal/types"
 	"github.com/technobecet/kaizoku-go/internal/util"
@@ -800,6 +801,24 @@ func (d *Deps) handleReplacementSuccess(ctx context.Context, args types.Download
 		Str("replaced", args.ReplacingFilename).
 		Str("from", args.ProviderName).
 		Msg("replacement download complete")
+}
+
+// notifyKomga notifies Komga to scan the series after a download.
+// Reads settings each time to pick up runtime config changes.
+func (d *Deps) notifyKomga(ctx context.Context, storagePath string) {
+	if d.Settings == nil || storagePath == "" {
+		return
+	}
+	settings, err := d.Settings.Get(ctx)
+	if err != nil || !settings.KomgaEnabled || settings.KomgaURL == "" {
+		return
+	}
+	client := komga.NewClient(settings.KomgaURL, settings.KomgaUsername, settings.KomgaPassword)
+	go func() {
+		notifyCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		client.NotifySeriesUpdate(notifyCtx, storagePath)
+	}()
 }
 
 // handleReplacementFailure retries the replacement or tries the next importance level.

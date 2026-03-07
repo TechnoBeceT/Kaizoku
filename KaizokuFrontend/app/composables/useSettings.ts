@@ -26,3 +26,10 @@ export function useUpdateSettings() {
     },
   })
 }
+
+export function useTestKomga() {
+  return useMutation({
+    mutationFn: (params: { url: string; username: string; password: string }) =>
+      settingsService.testKomga(params.url, params.username, params.password),
+  })
+}

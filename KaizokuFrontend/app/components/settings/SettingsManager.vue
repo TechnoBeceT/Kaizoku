@@ -33,6 +33,20 @@ const localSettings = ref<Settings | null>(null)
 const newRepository = ref('')
 const newCategory = ref('')
 
+const testKomgaMutation = useTestKomga()
+const komgaTestResult = ref<{ success: boolean; error?: string; libraries?: Array<{ id: string; name: string }> } | null>(null)
+
+async function testKomga() {
+  if (!localSettings.value) return
+  komgaTestResult.value = null
+  const result = await testKomgaMutation.mutateAsync({
+    url: localSettings.value.komgaUrl,
+    username: localSettings.value.komgaUsername,
+    password: localSettings.value.komgaPassword,
+  })
+  komgaTestResult.value = result
+}
+
 // Initialize from server settings.
 // In autoSave mode, only set once (don't overwrite user's in-progress edits).
 // In manual mode, keep synced with server changes.
@@ -182,7 +196,7 @@ async function handleSave() {
 }
 
 // Section visibility
-const SECTION_IDS = ['content-preferences', 'mihon-repositories', 'download-settings', 'schedule-tasks', 'storage', 'flaresolverr'] as const
+const SECTION_IDS = ['content-preferences', 'mihon-repositories', 'download-settings', 'schedule-tasks', 'storage', 'flaresolverr', 'komga'] as const
 const showSection = (id: string) => !props.sections || props.sections.includes(id)
 </script>
 
@@ -399,6 +413,53 @@ const showSection = (id: string) => !props.sections || props.sections.includes(i
               <div class="flex items-center gap-2">
                 <USwitch :model-value="localSettings.flareSolverrAsResponseFallback" @update:model-value="localSettings!.flareSolverrAsResponseFallback = $event; notifyChange()" />
                 <label class="text-sm">Use as Response Fallback</label>
+              </div>
+            </div>
+          </div>
+        </UCard>
+
+        <!-- Komga Integration -->
+        <UCard v-if="showSection('komga')">
+          <template #header>
+            <div>
+              <h3 class="font-semibold">Komga Integration</h3>
+              <p class="text-sm text-muted">Connect to Komga for automatic library updates after downloads.</p>
+            </div>
+          </template>
+          <div class="space-y-4">
+            <div class="flex items-center gap-2">
+              <USwitch :model-value="localSettings.komgaEnabled" @update:model-value="localSettings!.komgaEnabled = $event; notifyChange()" />
+              <label class="text-sm">Enable Komga Integration</label>
+            </div>
+            <div v-if="localSettings.komgaEnabled" class="space-y-4 pl-6 border-l-2 border-muted">
+              <div>
+                <label class="text-sm font-medium">Komga URL</label>
+                <UInput :model-value="localSettings.komgaUrl" placeholder="http://localhost:25600" @update:model-value="localSettings!.komgaUrl = $event as string; notifyChange()" />
+              </div>
+              <div>
+                <label class="text-sm font-medium">Username</label>
+                <UInput :model-value="localSettings.komgaUsername" placeholder="admin@example.com" @update:model-value="localSettings!.komgaUsername = $event as string; notifyChange()" />
+              </div>
+              <div>
+                <label class="text-sm font-medium">Password</label>
+                <UInput type="password" :model-value="localSettings.komgaPassword" placeholder="Password" @update:model-value="localSettings!.komgaPassword = $event as string; notifyChange()" />
+              </div>
+              <div class="flex items-center gap-3">
+                <UButton
+                  size="sm"
+                  variant="outline"
+                  icon="i-lucide-plug"
+                  label="Test Connection"
+                  :loading="testKomgaMutation.isPending.value"
+                  :disabled="!localSettings.komgaUrl"
+                  @click="testKomga"
+                />
+                <UBadge v-if="komgaTestResult?.success" color="success" size="xs">
+                  Connected — {{ komgaTestResult.libraries?.length || 0 }} libraries found
+                </UBadge>
+                <UBadge v-else-if="komgaTestResult && !komgaTestResult.success" color="error" size="xs">
+                  {{ komgaTestResult.error }}
+                </UBadge>
               </div>
             </div>
           </div>

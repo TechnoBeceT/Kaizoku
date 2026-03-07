@@ -67,6 +67,7 @@ func registerRoutes(e *echo.Echo, h *handler.Handler) {
 	settings.GET("", h.Settings.GetSettings)
 	settings.GET("/languages", h.Settings.GetLanguages)
 	settings.PUT("", h.Settings.UpdateSettings)
+	settings.POST("/komga-test", h.Settings.TestKomga)
 
 	// Setup / Import wizard
 	setup := api.Group("/setup")

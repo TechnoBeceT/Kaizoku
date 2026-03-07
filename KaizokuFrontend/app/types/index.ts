@@ -59,6 +59,10 @@ export interface Settings {
   flareSolverrTimeout: string
   flareSolverrSessionTtl: string
   flareSolverrAsResponseFallback: boolean
+  komgaEnabled: boolean
+  komgaUrl: string
+  komgaUsername: string
+  komgaPassword: string
   readonly storageFolder: string
   isWizardSetupComplete: boolean
   wizardSetupStepCompleted: number

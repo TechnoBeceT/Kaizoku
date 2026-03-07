@@ -272,6 +272,10 @@ func serialize(s *types.Settings) map[string]string {
 		"FlareSolverrTimeout":                       s.FlareSolverrTimeout,
 		"FlareSolverrSessionTtl":                    s.FlareSolverrSessionTTL,
 		"FlareSolverrAsResponseFallback":            strconv.FormatBool(s.FlareSolverrAsResponseFallback),
+		"KomgaEnabled":                              strconv.FormatBool(s.KomgaEnabled),
+		"KomgaUrl":                                  s.KomgaURL,
+		"KomgaUsername":                             s.KomgaUsername,
+		"KomgaPassword":                             s.KomgaPassword,
 		"IsWizardSetupComplete":                     strconv.FormatBool(s.IsWizardSetupComplete),
 		"WizardSetupStepCompleted":                  strconv.Itoa(s.WizardSetupStepCompleted),
 	}
@@ -329,6 +333,18 @@ func deserialize(kv map[string]string, s *types.Settings) {
 	}
 	if v, ok := kv["FlareSolverrAsResponseFallback"]; ok {
 		s.FlareSolverrAsResponseFallback, _ = strconv.ParseBool(v)
+	}
+	if v, ok := kv["KomgaEnabled"]; ok {
+		s.KomgaEnabled, _ = strconv.ParseBool(v)
+	}
+	if v, ok := kv["KomgaUrl"]; ok {
+		s.KomgaURL = v
+	}
+	if v, ok := kv["KomgaUsername"]; ok {
+		s.KomgaUsername = v
+	}
+	if v, ok := kv["KomgaPassword"]; ok {
+		s.KomgaPassword = v
 	}
 	if v, ok := kv["IsWizardSetupComplete"]; ok {
 		s.IsWizardSetupComplete, _ = strconv.ParseBool(v)

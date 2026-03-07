@@ -13,4 +13,8 @@ export const settingsService = {
   async updateSettings(settings: Settings): Promise<void> {
     return apiClient.put<void>('/api/settings', settings)
   },
+
+  async testKomga(url: string, username: string, password: string): Promise<{ success: boolean; error?: string; libraries?: Array<{ id: string; name: string }> }> {
+    return apiClient.post('/api/settings/komga-test', { url, username, password })
+  },
 }

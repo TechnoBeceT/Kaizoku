@@ -20,6 +20,10 @@ type Settings struct {
 	FlareSolverrTimeout                      string   `json:"flareSolverrTimeout"`
 	FlareSolverrSessionTTL                   string   `json:"flareSolverrSessionTtl"`
 	FlareSolverrAsResponseFallback           bool     `json:"flareSolverrAsResponseFallback"`
+	KomgaEnabled                             bool     `json:"komgaEnabled"`
+	KomgaURL                                 string   `json:"komgaUrl"`
+	KomgaUsername                            string   `json:"komgaUsername"`
+	KomgaPassword                            string   `json:"komgaPassword"`
 	IsWizardSetupComplete                    bool     `json:"isWizardSetupComplete"`
 	WizardSetupStepCompleted                 int      `json:"wizardSetupStepCompleted"`
 }
@@ -44,6 +48,10 @@ func DefaultSettings() Settings {
 		FlareSolverrTimeout:                      "00:00:30",
 		FlareSolverrSessionTTL:                   "00:15:00",
 		FlareSolverrAsResponseFallback:           false,
+		KomgaEnabled:                            false,
+		KomgaURL:                                "",
+		KomgaUsername:                            "",
+		KomgaPassword:                           "",
 		IsWizardSetupComplete:                    false,
 		WizardSetupStepCompleted:                 0,
 	}

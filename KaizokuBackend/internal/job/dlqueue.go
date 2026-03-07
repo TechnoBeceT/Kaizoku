@@ -390,6 +390,9 @@ func (d *DownloadDispatcher) executeDownload(ctx context.Context, itemID uuid.UU
 	} else {
 		d.deps.handleDownloadSuccess(ctx, args, cbzFilename)
 	}
+
+	// Notify Komga to scan the updated series
+	d.deps.notifyKomga(ctx, args.StoragePath)
 }
 
 // formatChapterNumber formats a float64 chapter number as a string.
