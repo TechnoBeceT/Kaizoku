@@ -6,11 +6,13 @@ const props = defineProps<{
   download: DownloadInfo
   progress?: number
   showActions?: boolean
+  showCancel?: boolean
 }>()
 
 const emit = defineEmits<{
   retry: []
   delete: []
+  cancel: []
 }>()
 
 const statusLabel = computed(() => {
@@ -101,6 +103,9 @@ function onImgError(e: Event) {
         <div v-if="showActions" class="flex gap-1 pt-1">
           <UButton size="xs" variant="outline" icon="i-lucide-refresh-cw" label="Retry" @click="emit('retry')" />
           <UButton size="xs" variant="outline" color="error" icon="i-lucide-trash-2" label="Delete" @click="emit('delete')" />
+        </div>
+        <div v-if="showCancel" class="flex gap-1 pt-1">
+          <UButton size="xs" variant="outline" color="error" icon="i-lucide-x" label="Cancel" @click="emit('cancel')" />
         </div>
       </div>
     </div>

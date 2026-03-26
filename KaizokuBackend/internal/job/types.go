@@ -10,7 +10,8 @@ import (
 
 // Queue names used by River (downloads are handled by custom DownloadDispatcher, not River).
 const (
-	QueueDefault = "default"
+	QueueDefault = "default" // High-volume per-item jobs (get_chapters, get_latest)
+	QueueBatch   = "batch"   // Bulk/batch jobs that must not be starved by per-item work
 )
 
 // --- River job argument types (non-download jobs only) ---
@@ -24,7 +25,8 @@ func (GetChaptersArgs) Kind() string { return "get_chapters" }
 
 func (GetChaptersArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue:       QueueDefault,
+		MaxAttempts: 5,
 		UniqueOpts: river.UniqueOpts{
 			ByArgs: true,
 		},
@@ -40,7 +42,8 @@ func (GetLatestArgs) Kind() string { return "get_latest" }
 
 func (GetLatestArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue:       QueueDefault,
+		MaxAttempts: 5,
 		UniqueOpts: river.UniqueOpts{
 			ByArgs: true,
 		},
@@ -54,7 +57,7 @@ func (UpdateExtensionsArgs) Kind() string { return "update_extensions" }
 
 func (UpdateExtensionsArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByPeriod: 1 * time.Hour,
 		},
@@ -68,7 +71,7 @@ func (UpdateAllSeriesArgs) Kind() string { return "update_all_series" }
 
 func (UpdateAllSeriesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByPeriod: 1 * time.Hour,
 		},
@@ -82,7 +85,7 @@ func (DailyUpdateArgs) Kind() string { return "daily_update" }
 
 func (DailyUpdateArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 	}
 }
 
@@ -95,7 +98,7 @@ func (ScanLocalFilesArgs) Kind() string { return "scan_local_files" }
 
 func (ScanLocalFilesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 	}
 }
 
@@ -108,7 +111,7 @@ func (InstallExtensionsArgs) Kind() string { return "install_extensions" }
 
 func (InstallExtensionsArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 	}
 }
 
@@ -119,7 +122,7 @@ func (SearchProvidersArgs) Kind() string { return "search_providers" }
 
 func (SearchProvidersArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 	}
 }
 
@@ -130,7 +133,7 @@ func (RefreshAllChaptersArgs) Kind() string { return "refresh_all_chapters" }
 
 func (RefreshAllChaptersArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByPeriod: 10 * time.Minute,
 		},
@@ -144,7 +147,7 @@ func (RefreshAllLatestArgs) Kind() string { return "refresh_all_latest" }
 
 func (RefreshAllLatestArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByPeriod: 5 * time.Minute,
 		},
@@ -160,7 +163,7 @@ func (ImportSeriesArgs) Kind() string { return "import_series" }
 
 func (ImportSeriesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 	}
 }
 
@@ -171,7 +174,7 @@ func (VerifyAllSeriesArgs) Kind() string { return "verify_all_series" }
 
 func (VerifyAllSeriesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByState: []rivertype.JobState{
 				rivertype.JobStatePending,
@@ -190,7 +193,7 @@ func (UpgradeAllSourcesArgs) Kind() string { return "upgrade_all_sources" }
 
 func (UpgradeAllSourcesArgs) InsertOpts() river.InsertOpts {
 	return river.InsertOpts{
-		Queue: QueueDefault,
+		Queue: QueueBatch,
 		UniqueOpts: river.UniqueOpts{
 			ByState: []rivertype.JobState{
 				rivertype.JobStatePending,

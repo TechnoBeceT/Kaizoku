@@ -548,6 +548,13 @@ func (d *DownloadDispatcher) DeleteAllFailed(ctx context.Context) (int, error) {
 		Exec(ctx)
 }
 
+// DeleteAllWaiting removes all scheduled (waiting) downloads from the queue.
+func (d *DownloadDispatcher) DeleteAllWaiting(ctx context.Context) (int, error) {
+	return d.db.DownloadQueueItem.Delete().
+		Where(downloadqueueitem.StatusEQ(types.DLStatusWaiting)).
+		Exec(ctx)
+}
+
 // CancelWaitingReplacements removes all waiting/scheduled download queue items
 // that are replacement downloads (isReplacement=true in args JSONB).
 func (d *DownloadDispatcher) CancelWaitingReplacements(ctx context.Context) (int, error) {

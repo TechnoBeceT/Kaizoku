@@ -113,6 +113,41 @@ func (h *DownloadsHandler) ManageErrorDownload(c echo.Context) error {
 	return c.JSON(http.StatusOK, nil)
 }
 
+// CancelDownload cancels a single waiting download.
+// DELETE /api/downloads/scheduled?id=<uuid>
+func (h *DownloadsHandler) CancelDownload(c echo.Context) error {
+	ctx := c.Request().Context()
+	idStr := c.QueryParam("id")
+
+	if idStr == "" {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "id required"})
+	}
+
+	itemID, err := uuid.Parse(idStr)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid id"})
+	}
+
+	if err := h.downloads.DeleteDownload(ctx, itemID); err != nil {
+		log.Error().Err(err).Str("id", idStr).Msg("failed to cancel download")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to cancel download"})
+	}
+	return c.JSON(http.StatusOK, nil)
+}
+
+// CancelAllScheduled removes all waiting/scheduled downloads from the queue.
+// DELETE /api/downloads/scheduled
+func (h *DownloadsHandler) CancelAllScheduled(c echo.Context) error {
+	ctx := c.Request().Context()
+	deleted, err := h.downloads.DeleteAllWaiting(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("failed to cancel all scheduled downloads")
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to cancel scheduled downloads"})
+	}
+	log.Info().Int("deleted", deleted).Msg("cancelled all scheduled downloads")
+	return c.JSON(http.StatusOK, map[string]int{"deleted": deleted})
+}
+
 // DeleteAllErrors removes all failed downloads from the queue.
 // DELETE /api/downloads/errors
 func (h *DownloadsHandler) DeleteAllErrors(c echo.Context) error {

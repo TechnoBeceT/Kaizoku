@@ -26,7 +26,7 @@ type Manager struct {
 }
 
 // NewManager creates a River client (for non-download jobs) and a custom DownloadDispatcher.
-func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suwayomi.Client, progress ProgressBroadcaster, settings SettingsReader) (*Manager, error) {
+func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suwayomi.Client, progress ProgressBroadcaster, settings SettingsReader, swProcess SuwayomiProcessController) (*Manager, error) {
 	dsn := cfg.Database.DSN()
 
 	pool, err := pgxpool.New(ctx, dsn)
@@ -35,12 +35,13 @@ func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suw
 	}
 
 	deps := &Deps{
-		DB:       db,
-		Pool:     pool,
-		Suwayomi: sw,
-		Progress: progress,
-		Config:   cfg,
-		Settings: settings,
+		DB:              db,
+		Pool:            pool,
+		Suwayomi:        sw,
+		Progress:        progress,
+		Config:          cfg,
+		Settings:        settings,
+		SuwayomiProcess: swProcess,
 	}
 
 	// Register River workers (non-download jobs only)
@@ -106,9 +107,8 @@ func NewManager(ctx context.Context, cfg *config.Config, db *ent.Client, sw *suw
 
 	riverClient, err := river.NewClient(riverpgxv5.New(pool), &river.Config{
 		Queues: map[string]river.QueueConfig{
-			QueueDefault: {
-				MaxWorkers: 5,
-			},
+			QueueDefault: {MaxWorkers: 5}, // get_chapters, get_latest
+			QueueBatch:   {MaxWorkers: 2}, // batch/bulk jobs (verify, refresh, import, etc.)
 		},
 		Workers:      workers,
 		PeriodicJobs: periodicJobs,

@@ -125,6 +125,30 @@ export function useDownloadsMetrics() {
   })
 }
 
+export function useCancelAllScheduled() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: () => downloadsService.cancelAllScheduled(),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'waiting'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'waiting-with-count'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'metrics'] })
+    },
+  })
+}
+
+export function useCancelDownload() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => downloadsService.cancelDownload(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'waiting'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'waiting-with-count'] })
+      queryClient.invalidateQueries({ queryKey: ['downloads', 'metrics'] })
+    },
+  })
+}
+
 export function useClearAllErrors() {
   const queryClient = useQueryClient()
   return useMutation({

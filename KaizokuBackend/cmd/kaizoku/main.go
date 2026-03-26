@@ -9,6 +9,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/technobecet/kaizoku-go/internal/backup"
 	"github.com/technobecet/kaizoku-go/internal/config"
 	"github.com/technobecet/kaizoku-go/internal/database"
 	"github.com/technobecet/kaizoku-go/internal/job"
@@ -38,6 +39,12 @@ func main() {
 	if err := suwayomi.Setup(context.Background(), cfg.Suwayomi, runtimeDir); err != nil {
 		log.Warn().Err(err).Msg("Suwayomi setup failed (continuing without embedded Suwayomi)")
 	}
+
+	// Backup Suwayomi DB before starting process (guaranteed consistent)
+	if _, _, err := backup.BackupSuwayomiDB(runtimeDir, "startup"); err != nil {
+		log.Warn().Err(err).Msg("startup Suwayomi backup failed (continuing)")
+	}
+	backup.CleanupOldBackups(runtimeDir)
 
 	// Start embedded Suwayomi process (unless using custom API)
 	var swProcess *suwayomi.ProcessManager
@@ -84,7 +91,11 @@ func main() {
 
 	// Create River job manager
 	ctx := context.Background()
-	jobMgr, err := job.NewManager(ctx, cfg, db, sw, hub, ss)
+	var swProcessCtrl job.SuwayomiProcessController
+	if swProcess != nil {
+		swProcessCtrl = swProcess
+	}
+	jobMgr, err := job.NewManager(ctx, cfg, db, sw, hub, ss, swProcessCtrl)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to create job manager")
 	}

@@ -54,6 +54,14 @@ export const downloadsService = {
     return apiClient.delete<{ deleted: number }>('/api/downloads/errors')
   },
 
+  async cancelAllScheduled(): Promise<{ deleted: number }> {
+    return apiClient.delete<{ deleted: number }>('/api/downloads/scheduled')
+  },
+
+  async cancelDownload(id: string): Promise<void> {
+    return apiClient.delete<void>(`/api/downloads/scheduled/item?id=${id}`)
+  },
+
   async manageErrorDownload(id: string, action: ErrorDownloadAction): Promise<void> {
     const params = new URLSearchParams()
     params.append('id', id)

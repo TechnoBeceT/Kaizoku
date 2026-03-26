@@ -50,6 +50,8 @@ func registerRoutes(e *echo.Echo, h *handler.Handler) {
 	downloads.GET("/series", h.Downloads.GetSeriesDownloads)
 	downloads.GET("/metrics", h.Downloads.GetDownloadMetrics)
 	downloads.PATCH("", h.Downloads.ManageErrorDownload)
+	downloads.DELETE("/scheduled", h.Downloads.CancelAllScheduled)
+	downloads.DELETE("/scheduled/item", h.Downloads.CancelDownload)
 	downloads.DELETE("/errors", h.Downloads.DeleteAllErrors)
 
 	// Provider

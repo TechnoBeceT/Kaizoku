@@ -12,6 +12,8 @@ const { data: scheduledData } = useWaitingDownloadsWithCount(limit, computed(() 
 const { data: failedData } = useFailedDownloadsWithCount(limit, computed(() => debouncedSearchTerm.value.trim() || undefined))
 const manageError = useManageErrorDownload()
 const clearAllErrors = useClearAllErrors()
+const cancelAllScheduled = useCancelAllScheduled()
+const cancelDownload = useCancelDownload()
 
 const showCompletedModal = ref(false)
 const showScheduledModal = ref(false)
@@ -27,6 +29,14 @@ function handleDeleteError(id: string) {
 
 function handleClearAllErrors() {
   clearAllErrors.mutate()
+}
+
+function handleCancelAllScheduled() {
+  cancelAllScheduled.mutate()
+}
+
+function handleCancelDownload(id: string) {
+  cancelDownload.mutate(id)
 }
 </script>
 
@@ -93,14 +103,26 @@ function handleClearAllErrors() {
             <span class="font-semibold">Scheduled Downloads</span>
             <UBadge>{{ scheduledData?.totalCount || 0 }}</UBadge>
           </div>
-          <UButton
-            v-if="scheduledData && scheduledData.totalCount > (scheduledData.downloads?.length || 0)"
-            size="xs"
-            variant="outline"
-            label="View All"
-            icon="i-lucide-expand"
-            @click="showScheduledModal = true"
-          />
+          <div class="flex items-center gap-2">
+            <UButton
+              v-if="scheduledData && scheduledData.totalCount > 0"
+              size="xs"
+              variant="outline"
+              color="error"
+              label="Cancel All"
+              icon="i-lucide-x-circle"
+              :loading="cancelAllScheduled.isPending.value"
+              @click="handleCancelAllScheduled"
+            />
+            <UButton
+              v-if="scheduledData && scheduledData.totalCount > (scheduledData.downloads?.length || 0)"
+              size="xs"
+              variant="outline"
+              label="View All"
+              icon="i-lucide-expand"
+              @click="showScheduledModal = true"
+            />
+          </div>
         </div>
       </template>
       <div v-if="!scheduledData?.downloads?.length" class="flex items-center justify-center py-8 text-muted">
@@ -110,7 +132,13 @@ function handleClearAllErrors() {
         </div>
       </div>
       <div v-else class="grid gap-2 md:grid-cols-3 lg:grid-cols-5">
-        <QueueDownloadCard v-for="dl in scheduledData.downloads" :key="dl.id" :download="dl" />
+        <QueueDownloadCard
+          v-for="dl in scheduledData.downloads"
+          :key="dl.id"
+          :download="dl"
+          show-cancel
+          @cancel="handleCancelDownload(dl.id)"
+        />
       </div>
     </UCard>
 

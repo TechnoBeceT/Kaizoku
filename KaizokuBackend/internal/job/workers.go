@@ -19,6 +19,7 @@ import (
 	"github.com/riverqueue/river"
 	"github.com/riverqueue/river/rivertype"
 	"github.com/rs/zerolog/log"
+	"github.com/technobecet/kaizoku-go/internal/backup"
 	"github.com/technobecet/kaizoku-go/internal/config"
 	"github.com/technobecet/kaizoku-go/internal/ent"
 	"github.com/technobecet/kaizoku-go/internal/ent/importentry"
@@ -49,8 +50,16 @@ type Deps struct {
 	Progress      ProgressBroadcaster
 	Config        *config.Config
 	Settings      SettingsReader                   // DB settings (UI-configured values)
-	DownloadQueue *DownloadDispatcher // Custom download queue (replaces River for downloads)
-	RiverClient   RiverInserter       // For enqueuing River jobs from shared functions
+	DownloadQueue   *DownloadDispatcher       // Custom download queue (replaces River for downloads)
+	RiverClient     RiverInserter             // For enqueuing River jobs from shared functions
+	SuwayomiProcess SuwayomiProcessController // nil when using custom API
+}
+
+// SuwayomiProcessController allows stopping/starting the Suwayomi process for backups.
+type SuwayomiProcessController interface {
+	Stop()
+	Start(ctx context.Context) error
+	IsRunning() bool
 }
 
 // RiverInserter is the interface for inserting River jobs (allows both handler and worker context).
@@ -962,6 +971,10 @@ type GetChaptersWorker struct {
 	Deps *Deps
 }
 
+func (w *GetChaptersWorker) Timeout(job *river.Job[GetChaptersArgs]) time.Duration {
+	return 2 * time.Minute
+}
+
 func (w *GetChaptersWorker) Work(ctx context.Context, job *river.Job[GetChaptersArgs]) error {
 	providerID := job.Args.ProviderID
 
@@ -1389,6 +1402,10 @@ type GetLatestWorker struct {
 	Deps *Deps
 }
 
+func (w *GetLatestWorker) Timeout(job *river.Job[GetLatestArgs]) time.Duration {
+	return 2 * time.Minute
+}
+
 func (w *GetLatestWorker) Work(ctx context.Context, job *river.Job[GetLatestArgs]) error {
 	sourceID := job.Args.SourceID
 	log.Info().Str("sourceId", sourceID).Msg("fetching latest series")
@@ -1611,6 +1628,10 @@ type UpdateExtensionsWorker struct {
 	Deps *Deps
 }
 
+func (w *UpdateExtensionsWorker) Timeout(job *river.Job[UpdateExtensionsArgs]) time.Duration {
+	return 10 * time.Minute
+}
+
 func (w *UpdateExtensionsWorker) Work(ctx context.Context, job *river.Job[UpdateExtensionsArgs]) error {
 	log.Info().Msg("checking for extension updates")
 
@@ -1816,6 +1837,10 @@ type UpdateAllSeriesWorker struct {
 	Deps *Deps
 }
 
+func (w *UpdateAllSeriesWorker) Timeout(job *river.Job[UpdateAllSeriesArgs]) time.Duration {
+	return 2 * time.Hour
+}
+
 func (w *UpdateAllSeriesWorker) Work(ctx context.Context, job *river.Job[UpdateAllSeriesArgs]) error {
 	jobID := fmt.Sprintf("update-all-%d", job.ID)
 	log.Info().Msg("updating all series")
@@ -1960,6 +1985,10 @@ type RefreshAllChaptersWorker struct {
 	Deps *Deps
 }
 
+func (w *RefreshAllChaptersWorker) Timeout(job *river.Job[RefreshAllChaptersArgs]) time.Duration {
+	return 2 * time.Hour
+}
+
 func (w *RefreshAllChaptersWorker) Work(ctx context.Context, job *river.Job[RefreshAllChaptersArgs]) error {
 	providers, err := w.Deps.DB.SeriesProvider.Query().
 		Where(
@@ -2005,6 +2034,10 @@ type RefreshAllLatestWorker struct {
 	Deps *Deps
 }
 
+func (w *RefreshAllLatestWorker) Timeout(job *river.Job[RefreshAllLatestArgs]) time.Duration {
+	return 30 * time.Minute
+}
+
 func (w *RefreshAllLatestWorker) Work(ctx context.Context, job *river.Job[RefreshAllLatestArgs]) error {
 	// Fetch ALL installed sources from Suwayomi directly (not just ProviderStorage)
 	// This ensures cloud-latest works even before any series are imported
@@ -2043,6 +2076,10 @@ type DailyUpdateWorker struct {
 	Deps *Deps
 }
 
+func (w *DailyUpdateWorker) Timeout(job *river.Job[DailyUpdateArgs]) time.Duration {
+	return 10 * time.Minute
+}
+
 func (w *DailyUpdateWorker) Work(ctx context.Context, job *river.Job[DailyUpdateArgs]) error {
 	log.Info().Msg("running daily maintenance")
 
@@ -2067,8 +2104,30 @@ func (w *DailyUpdateWorker) Work(ctx context.Context, job *river.Job[DailyUpdate
 		log.Info().Int("count", seDeleted).Msg("cleaned up old source events")
 	}
 
-	// Note: PostgreSQL handles its own backups (unlike SQLite VACUUM INTO in .NET version)
-	// The .NET version also cleaned up Suwayomi temp directory - that's handled by Suwayomi itself
+	// Backup Suwayomi H2 database (stop → backup → restart)
+	configDir := config.ConfigDir()
+	if w.Deps.SuwayomiProcess != nil && w.Deps.SuwayomiProcess.IsRunning() {
+		log.Info().Msg("daily: stopping Suwayomi for DB backup")
+		w.Deps.SuwayomiProcess.Stop()
+
+		if _, _, err := backup.BackupSuwayomiDB(configDir, "daily"); err != nil {
+			log.Warn().Err(err).Msg("daily: Suwayomi backup failed")
+		}
+		backup.CleanupOldBackups(configDir)
+
+		log.Info().Msg("daily: restarting Suwayomi")
+		go func() {
+			if err := w.Deps.SuwayomiProcess.Start(context.Background()); err != nil {
+				log.Error().Err(err).Msg("daily: failed to restart Suwayomi after backup")
+			}
+		}()
+	} else {
+		// Suwayomi not managed by us (custom API) or not running — backup without stop
+		if _, _, err := backup.BackupSuwayomiDB(configDir, "daily"); err != nil {
+			log.Warn().Err(err).Msg("daily: Suwayomi backup failed")
+		}
+		backup.CleanupOldBackups(configDir)
+	}
 
 	log.Info().Msg("daily maintenance complete")
 	return nil
@@ -2081,6 +2140,10 @@ func (w *DailyUpdateWorker) Work(ctx context.Context, job *river.Job[DailyUpdate
 type ScanLocalFilesWorker struct {
 	river.WorkerDefaults[ScanLocalFilesArgs]
 	Deps *Deps
+}
+
+func (w *ScanLocalFilesWorker) Timeout(job *river.Job[ScanLocalFilesArgs]) time.Duration {
+	return 30 * time.Minute
 }
 
 func (w *ScanLocalFilesWorker) Work(ctx context.Context, job *river.Job[ScanLocalFilesArgs]) error {
@@ -2186,6 +2249,10 @@ type InstallExtensionsWorker struct {
 	Deps *Deps
 }
 
+func (w *InstallExtensionsWorker) Timeout(job *river.Job[InstallExtensionsArgs]) time.Duration {
+	return 10 * time.Minute
+}
+
 func (w *InstallExtensionsWorker) Work(ctx context.Context, job *river.Job[InstallExtensionsArgs]) error {
 	jobID := fmt.Sprintf("install-ext-%d", job.ID)
 	log.Info().Msg("installing required extensions for imports")
@@ -2286,6 +2353,10 @@ type SearchProvidersWorker struct {
 	Deps *Deps
 }
 
+func (w *SearchProvidersWorker) Timeout(job *river.Job[SearchProvidersArgs]) time.Duration {
+	return 2 * time.Hour
+}
+
 func (w *SearchProvidersWorker) Work(ctx context.Context, job *river.Job[SearchProvidersArgs]) error {
 	jobID := fmt.Sprintf("search-%d", job.ID)
 	log.Info().Msg("searching for imported series across providers")
@@ -2360,72 +2431,83 @@ func (w *SearchProvidersWorker) Work(ctx context.Context, job *river.Job[SearchP
 			continue
 		}
 
-		log.Info().Str("title", imp.Info.Title).Msg("searching for series")
+		// Wrap each series search in a recover to match .NET's per-series try/catch.
+		// A panic in one series must not kill the entire search job.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Error().Interface("panic", r).Str("title", imp.Info.Title).
+						Msg("panic during series search (skipping)")
+				}
+			}()
 
-		// Determine which languages to search
-		langs := make(map[string]struct{})
-		for _, p := range imp.Info.Providers {
-			if p.Language != "" {
-				langs[strings.ToLower(p.Language)] = struct{}{}
+			log.Info().Str("title", imp.Info.Title).Msg("searching for series")
+
+			// Determine which languages to search
+			langs := make(map[string]struct{})
+			for _, p := range imp.Info.Providers {
+				if p.Language != "" {
+					langs[strings.ToLower(p.Language)] = struct{}{}
+				}
 			}
-		}
-		if len(langs) == 0 {
-			langs["en"] = struct{}{}
-		}
-
-		// Filter sources by language
-		var filteredSources []suwayomi.SuwayomiSource
-		for _, src := range sources {
-			srcLang := strings.ToLower(src.Lang)
-			if _, ok := langs[srcLang]; ok || srcLang == "all" {
-				filteredSources = append(filteredSources, src)
-			}
-		}
-
-		// Search for the series across filtered sources
-		found := w.searchForSeries(ctx, imp.Info.Title, imp.Info.Providers, filteredSources)
-
-		if len(found) > 0 {
-			// Assign sequential importance (0 = highest priority)
-			for i := range found {
-				found[i].Importance = i
-				found[i].IsSelected = i == 0
-			}
-			// Store search results in import
-			seriesJSON := fullSeriesToRawJSON(found)
-			_, err := w.Deps.DB.ImportEntry.UpdateOneID(imp.ID).
-				SetSeries(seriesJSON).
-				Save(ctx)
-			if err != nil {
-				log.Warn().Err(err).Str("path", imp.ID).Msg("failed to update import with search results")
+			if len(langs) == 0 {
+				langs["en"] = struct{}{}
 			}
 
-			providerList := make(map[string]struct{})
-			for _, fs := range found {
-				providerList[fs.Provider] = struct{}{}
-			}
-			provNames := make([]string, 0, len(providerList))
-			for p := range providerList {
-				provNames = append(provNames, p)
-			}
-
-			w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeSearchProviders),
-				int(types.ProgressStatusRunning), acum,
-				imp.Info.Title+" found in "+strings.Join(provNames, ",")+".", nil)
-		} else {
-			// Mark as skip
-			_, err := w.Deps.DB.ImportEntry.UpdateOneID(imp.ID).
-				SetStatus(int(types.ImportStatusSkip)).
-				SetAction(int(types.ImportActionSkip)).
-				Save(ctx)
-			if err != nil {
-				log.Warn().Err(err).Str("path", imp.ID).Msg("failed to update import status")
+			// Filter sources by language
+			var filteredSources []suwayomi.SuwayomiSource
+			for _, src := range sources {
+				srcLang := strings.ToLower(src.Lang)
+				if _, ok := langs[srcLang]; ok || srcLang == "all" {
+					filteredSources = append(filteredSources, src)
+				}
 			}
 
-			w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeSearchProviders),
-				int(types.ProgressStatusRunning), acum,
-				"Series "+imp.Title+" not found in available providers", nil)
-		}
+			// Search for the series across filtered sources
+			found := w.searchForSeries(ctx, imp.Info.Title, imp.Info.Providers, filteredSources)
+
+			if len(found) > 0 {
+				// Assign sequential importance (0 = highest priority)
+				for i := range found {
+					found[i].Importance = i
+					found[i].IsSelected = i == 0
+				}
+				// Store search results in import
+				seriesJSON := fullSeriesToRawJSON(found)
+				_, err := w.Deps.DB.ImportEntry.UpdateOneID(imp.ID).
+					SetSeries(seriesJSON).
+					Save(ctx)
+				if err != nil {
+					log.Warn().Err(err).Str("path", imp.ID).Msg("failed to update import with search results")
+				}
+
+				providerList := make(map[string]struct{})
+				for _, fs := range found {
+					providerList[fs.Provider] = struct{}{}
+				}
+				provNames := make([]string, 0, len(providerList))
+				for p := range providerList {
+					provNames = append(provNames, p)
+				}
+
+				w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeSearchProviders),
+					int(types.ProgressStatusRunning), acum,
+					imp.Info.Title+" found in "+strings.Join(provNames, ",")+".", nil)
+			} else {
+				// Mark as skip
+				_, err := w.Deps.DB.ImportEntry.UpdateOneID(imp.ID).
+					SetStatus(int(types.ImportStatusSkip)).
+					SetAction(int(types.ImportActionSkip)).
+					Save(ctx)
+				if err != nil {
+					log.Warn().Err(err).Str("path", imp.ID).Msg("failed to update import status")
+				}
+
+				w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeSearchProviders),
+					int(types.ProgressStatusRunning), acum,
+					"Series "+imp.Title+" not found in available providers", nil)
+			}
+		}()
 
 		acum += step
 	}
@@ -2532,7 +2614,7 @@ func (w *SearchProvidersWorker) searchSources(
 	var results []types.FullSeries
 	for _, hit := range hits {
 		fullData, err := w.Deps.Suwayomi.GetFullSeriesData(ctx, hit.series.ID, true)
-		if err != nil {
+		if err != nil || fullData == nil {
 			log.Warn().Err(err).Int("id", hit.series.ID).Msg("failed to fetch full data")
 			continue
 		}
@@ -2630,6 +2712,10 @@ func (w *SearchProvidersWorker) searchSources(
 type ImportSeriesWorker struct {
 	river.WorkerDefaults[ImportSeriesArgs]
 	Deps *Deps
+}
+
+func (w *ImportSeriesWorker) Timeout(job *river.Job[ImportSeriesArgs]) time.Duration {
+	return 4 * time.Hour
 }
 
 func (w *ImportSeriesWorker) Work(ctx context.Context, job *river.Job[ImportSeriesArgs]) error {
@@ -3761,6 +3847,10 @@ type VerifyAllSeriesWorker struct {
 	Deps *Deps
 }
 
+func (w *VerifyAllSeriesWorker) Timeout(job *river.Job[VerifyAllSeriesArgs]) time.Duration {
+	return 4 * time.Hour
+}
+
 func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAllSeriesArgs]) error {
 	jobID := fmt.Sprintf("verify-all-%d", j.ID)
 	w.Deps.Progress.BroadcastProgress(jobID, int(types.JobTypeVerifyAll),
@@ -3964,6 +4054,10 @@ func (w *VerifyAllSeriesWorker) Work(ctx context.Context, j *river.Job[VerifyAll
 type UpgradeAllSourcesWorker struct {
 	river.WorkerDefaults[UpgradeAllSourcesArgs]
 	Deps *Deps
+}
+
+func (w *UpgradeAllSourcesWorker) Timeout(job *river.Job[UpgradeAllSourcesArgs]) time.Duration {
+	return 2 * time.Hour
 }
 
 func (w *UpgradeAllSourcesWorker) Work(ctx context.Context, j *river.Job[UpgradeAllSourcesArgs]) error {
